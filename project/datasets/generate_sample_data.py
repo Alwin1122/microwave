@@ -66,7 +66,10 @@ def generate_legacy_mat():
         {
             "frequency": freqs / 1e9,  # stored in GHz, loader auto-converts to Hz
             "s_parameters": traces,
-            "notes": "Synthetic 8-antenna UWB breast imaging dataset (legacy .mat)",
+            "notes": (
+                "Synthetic 8-antenna UWB breast imaging dataset (legacy .mat); "
+                "antenna radius=8 cm; wave speed=3.0e8 m/s; x span=-5 cm to 5 cm; y span=-5 cm to 5 cm"
+            ),
         },
     )
     print(f"Wrote {path}")
@@ -96,7 +99,10 @@ def generate_touchstone():
 
     freq_obj = skrf.Frequency.from_f(freqs / 1e9, unit="ghz")
     network = skrf.Network(frequency=freq_obj, s=s, z0=50)
-    network.comments = "Synthetic 2-port Touchstone sample dataset"
+    network.comments = (
+        "Synthetic 2-port Touchstone sample dataset; antenna radius=8 cm; "
+        "wave speed=3.0e8 m/s; x span=-5 cm to 5 cm; y span=-5 cm to 5 cm"
+    )
     path = os.path.join(OUT_DIR, "sample_touchstone.s2p")
     network.write_touchstone(path, form="ri")
     print(f"Wrote {path}")

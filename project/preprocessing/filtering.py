@@ -30,7 +30,8 @@ Description:
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import butter, filtfilt, savgol_filter
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import butter, filtfilt, medfilt, savgol_filter
 
 from utils.exceptions import InvalidSParameterError
 from utils.logger import get_logger
@@ -154,6 +155,55 @@ def butterworth_lowpass_filter(
     return _apply_along_freq(s_params, _filt)
 
 
+def gaussian_smoothing_filter(s_params: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """
+    Purpose:
+        Apply mild Gaussian smoothing along the frequency axis, often a
+        good compromise between denoising and preserving weak response
+        variations.
+    Input:
+        s_params (np.ndarray): complex S-parameters, shape (n_freq, ...).
+        sigma (float): standard deviation of the Gaussian kernel in
+            samples.
+    Output:
+        np.ndarray: filtered S-parameters, same shape as input.
+    """
+    if s_params.shape[0] == 0:
+        raise InvalidSParameterError("Cannot filter an empty S-parameter array.")
+
+    sigma = max(float(sigma), 0.0)
+    if sigma == 0.0:
+        return s_params.copy()
+
+    logger.info(f"Applying Gaussian smoothing filter (sigma={sigma})")
+    return _apply_along_freq(s_params, lambda x: gaussian_filter1d(x, sigma=sigma, mode="nearest"))
+
+
+def median_smoothing_filter(s_params: np.ndarray, kernel_size: int = 5) -> np.ndarray:
+    """
+    Purpose:
+        Apply a median filter along the frequency axis to suppress
+        isolated spikes while preserving broader structure.
+    Input:
+        s_params (np.ndarray): complex S-parameters, shape (n_freq, ...).
+        kernel_size (int): odd median-filter length in samples.
+    Output:
+        np.ndarray: filtered S-parameters, same shape as input.
+    """
+    if s_params.shape[0] == 0:
+        raise InvalidSParameterError("Cannot filter an empty S-parameter array.")
+
+    kernel_size = max(1, int(kernel_size))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    kernel_size = min(kernel_size, s_params.shape[0] if s_params.shape[0] % 2 == 1 else s_params.shape[0] - 1)
+    if kernel_size <= 1:
+        return s_params.copy()
+
+    logger.info(f"Applying median smoothing filter (kernel_size={kernel_size})")
+    return _apply_along_freq(s_params, lambda x: medfilt(x, kernel_size=kernel_size))
+
+
 def apply_noise_filter(
     s_params: np.ndarray, method: str = "savgol", **kwargs
 ) -> np.ndarray:
@@ -163,7 +213,8 @@ def apply_noise_filter(
         the selected noise-filtering method by name.
     Input:
         s_params (np.ndarray): complex S-parameters.
-        method (str): one of 'moving_average', 'savgol', 'butterworth', 'none'.
+        method (str): one of 'moving_average', 'gaussian', 'median',
+            'savgol', 'butterworth', 'none'.
         **kwargs: forwarded to the specific filter function.
     Output:
         np.ndarray: filtered S-parameters.
@@ -173,6 +224,10 @@ def apply_noise_filter(
         return s_params.copy()
     if method in ("moving_average", "moving-average", "ma"):
         return moving_average_filter(s_params, **kwargs)
+    if method in ("gaussian", "gaussian_smoothing"):
+        return gaussian_smoothing_filter(s_params, **kwargs)
+    if method in ("median", "median_filter"):
+        return median_smoothing_filter(s_params, **kwargs)
     if method in ("savgol", "savitzky_golay", "savitzky-golay"):
         return savitzky_golay_filter(s_params, **kwargs)
     if method in ("butterworth", "butter", "lowpass"):

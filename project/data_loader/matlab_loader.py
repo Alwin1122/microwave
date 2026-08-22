@@ -40,6 +40,7 @@ from scipy.io import loadmat
 from scipy.io.matlab import MatReadError
 
 from data_loader.dataset_info import MicrowaveDataset
+from data_loader.physical_metadata import extract_physical_metadata_from_values
 from data_loader.validator import validate_dataset, validate_file_path
 from utils.exceptions import CorruptedFileError, MissingVariableError
 from utils.logger import get_logger
@@ -296,6 +297,8 @@ def load_matlab_dataset(file_path: str) -> MicrowaveDataset:
             "'train_data.mat')."
         )
 
+    physical_metadata = extract_physical_metadata_from_values(variables)
+
     freq_result = _find_frequency_vector(variables)
     if freq_result is not None:
         freq_name, frequencies = freq_result
@@ -337,7 +340,15 @@ def load_matlab_dataset(file_path: str) -> MicrowaveDataset:
         s_parameters=s_parameters,
         n_ports=n_ports,
         available_variables=sorted(variables.keys()),
-        metadata={"frequency_variable": freq_name, "sparameter_variable": sparam_name},
+        metadata={
+            "frequency_variable": freq_name,
+            "sparameter_variable": sparam_name,
+            **physical_metadata,
+            "antenna_radius_m": physical_metadata.get("antenna_radius_m", 0.08),
+            "wave_speed_m_per_s": physical_metadata.get("wave_speed_m_per_s", 3e8),
+            "reconstruction_x_span_m": physical_metadata.get("reconstruction_x_span_m", (-0.05, 0.05)),
+            "reconstruction_y_span_m": physical_metadata.get("reconstruction_y_span_m", (-0.05, 0.05)),
+        },
         raw={},
     )
 

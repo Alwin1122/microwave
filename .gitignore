@@ -1,0 +1,29 @@
+# Virtual environments
+.venv/
+.venv_local/
+venv/
+**/venv/
+**/.venv/
+**/.venv_local/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local / generated
+*.log
+.cursor/

@@ -30,6 +30,7 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -47,7 +48,9 @@ from PySide6.QtWidgets import (
 )
 
 from data_loader.dataset_info import MicrowaveDataset
+from data_loader.loader import load_dataset
 from gui.upload_page import UploadPage
+from gui.reconstruction_page import ReconstructionPanel
 from preprocessing.preprocessing_pipeline import (
     PreprocessingConfig,
     PreprocessingResult,
@@ -99,9 +102,13 @@ class PreprocessingPanel(QWidget):
         the processing summary table.
     """
 
+    preprocessing_completed = Signal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.dataset: MicrowaveDataset | None = None
+        self.repeated_measurement_paths: list[str] = []
+        self.reference_dataset_path: str | None = None
         self.status_log = StatusLog()
         self.worker: PreprocessingWorker | None = None
         self.last_result: PreprocessingResult | None = None
@@ -120,7 +127,7 @@ class PreprocessingPanel(QWidget):
         form = QFormLayout()
 
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["savgol", "moving_average", "butterworth", "none"])
+        self.filter_combo.addItems(["savgol", "gaussian", "median", "moving_average", "butterworth", "none"])
         form.addRow("Noise Filtering:", self.filter_combo)
 
         self.calibration_combo = QComboBox()
@@ -138,6 +145,34 @@ class PreprocessingPanel(QWidget):
         self.artifact_combo = QComboBox()
         self.artifact_combo.addItems(["hybrid", "svd", "background", "none"])
         form.addRow("Artifact Suppression:", self.artifact_combo)
+
+        auxiliary_row = QVBoxLayout()
+
+        repeated_row = QHBoxLayout()
+        self.repeated_button = QPushButton("Select Repeated .s2p Files")
+        self.repeated_button.clicked.connect(self._select_repeated_measurements)
+        repeated_row.addWidget(self.repeated_button)
+        self.repeated_label = QLabel("No repeated files selected.")
+        self.repeated_label.setWordWrap(True)
+        repeated_row.addWidget(self.repeated_label, stretch=1)
+        auxiliary_row.addLayout(repeated_row)
+
+        reference_row = QHBoxLayout()
+        self.reference_button = QPushButton("Select Reference .s2p File")
+        self.reference_button.clicked.connect(self._select_reference_dataset)
+        reference_row.addWidget(self.reference_button)
+        self.reference_label = QLabel("No reference file selected.")
+        self.reference_label.setWordWrap(True)
+        reference_row.addWidget(self.reference_label, stretch=1)
+        auxiliary_row.addLayout(reference_row)
+
+        self.touchstone_hint_label = QLabel(
+            "Repeated-measurement averaging and reference subtraction are available for Touchstone .s2p datasets only."
+        )
+        self.touchstone_hint_label.setWordWrap(True)
+        auxiliary_row.addWidget(self.touchstone_hint_label)
+
+        form.addRow("S21 Auxiliary Inputs:", auxiliary_row)
 
         config_group.setLayout(form)
         layout.addWidget(config_group)
@@ -206,7 +241,84 @@ class PreprocessingPanel(QWidget):
         """
         self.dataset = dataset
         self.run_button.setEnabled(True)
+        self._reset_auxiliary_inputs()
+        self._update_auxiliary_controls()
         self._log(f"Dataset '{dataset.file_name}' ready for preprocessing.")
+
+    def _is_touchstone_s2p_dataset(self) -> bool:
+        return self.dataset is not None and self.dataset.file_path.lower().endswith(".s2p")
+
+    def _reset_auxiliary_inputs(self) -> None:
+        self.repeated_measurement_paths = []
+        self.reference_dataset_path = None
+        self.repeated_label.setText("No repeated files selected.")
+        self.reference_label.setText("No reference file selected.")
+
+    def _update_auxiliary_controls(self) -> None:
+        enabled = self._is_touchstone_s2p_dataset()
+        self.repeated_button.setEnabled(enabled)
+        self.reference_button.setEnabled(enabled)
+        self.touchstone_hint_label.setVisible(True)
+        if enabled:
+            self.touchstone_hint_label.setText(
+                "Optional .s2p auxiliary inputs: select repeated measurements for complex averaging and a matching reference for complex subtraction."
+            )
+        else:
+            self.touchstone_hint_label.setText(
+                "Repeated-measurement averaging and reference subtraction are available for Touchstone .s2p datasets only."
+            )
+
+    def _select_repeated_measurements(self) -> None:
+        if not self._is_touchstone_s2p_dataset():
+            return
+
+        start_dir = self.dataset.file_path.rsplit("\\", 1)[0] if self.dataset is not None and "\\" in self.dataset.file_path else ""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Repeated Touchstone Measurements",
+            start_dir,
+            "Touchstone S2P Files (*.s2p)",
+        )
+        if not file_paths:
+            return
+
+        current_path = self.dataset.file_path if self.dataset is not None else None
+        self.repeated_measurement_paths = [path for path in file_paths if path != current_path]
+        self.repeated_label.setText(f"{len(self.repeated_measurement_paths)} repeated file(s) selected.")
+        self._log(f"Selected {len(self.repeated_measurement_paths)} repeated .s2p file(s) for averaging.")
+
+    def _select_reference_dataset(self) -> None:
+        if not self._is_touchstone_s2p_dataset():
+            return
+
+        start_dir = self.dataset.file_path.rsplit("\\", 1)[0] if self.dataset is not None and "\\" in self.dataset.file_path else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Reference Touchstone Measurement",
+            start_dir,
+            "Touchstone S2P Files (*.s2p)",
+        )
+        if not file_path:
+            return
+
+        if self.dataset is not None and file_path == self.dataset.file_path:
+            QMessageBox.warning(self, "Invalid Reference", "Select a different .s2p file as the reference dataset.")
+            return
+
+        self.reference_dataset_path = file_path
+        self.reference_label.setText(file_path.split("\\")[-1])
+        self._log(f"Selected reference .s2p file: {file_path}")
+
+    def _load_auxiliary_datasets(self) -> tuple[list[MicrowaveDataset] | None, MicrowaveDataset | None]:
+        if not self._is_touchstone_s2p_dataset():
+            return None, None
+
+        repeated_datasets: list[MicrowaveDataset] = []
+        for path in self.repeated_measurement_paths:
+            repeated_datasets.append(load_dataset(path))
+
+        reference_dataset = load_dataset(self.reference_dataset_path) if self.reference_dataset_path else None
+        return repeated_datasets or None, reference_dataset
 
     def on_run_clicked(self) -> None:
         """
@@ -222,12 +334,25 @@ class PreprocessingPanel(QWidget):
             QMessageBox.warning(self, "No Dataset", "Please load a dataset in Module 1 first.")
             return
 
+        try:
+            repeated_measurements, reference_dataset = self._load_auxiliary_datasets()
+        except MicrowaveFrameworkError as exc:
+            self._log(f"Failed to load auxiliary Touchstone dataset: {exc}", "ERROR")
+            QMessageBox.critical(self, "Auxiliary Dataset Error", str(exc))
+            return
+        except FileNotFoundError as exc:
+            self._log(str(exc), "ERROR")
+            QMessageBox.critical(self, "Auxiliary Dataset Error", str(exc))
+            return
+
         config = PreprocessingConfig(
             filter_method=self.filter_combo.currentText(),
             calibration_method=self.calibration_combo.currentText(),
             normalization_method=self.normalization_combo.currentText(),
             do_background_subtraction=(self.background_combo.currentText() == "enabled"),
             artifact_method=self.artifact_combo.currentText(),
+            repeated_measurements=repeated_measurements,
+            reference_dataset=reference_dataset,
         )
 
         self.run_button.setEnabled(False)
@@ -252,12 +377,20 @@ class PreprocessingPanel(QWidget):
     def _on_finished(self, result: PreprocessingResult) -> None:
         self.last_result = result
         self._log("Preprocessing completed successfully.", "SUCCESS")
+        if result.validation_report is not None:
+            if result.validation_report.averaging_performed:
+                self._log("Complex averaging was applied using the selected repeated .s2p measurements.")
+            if result.validation_report.reference_subtraction_performed:
+                self._log("Complex reference subtraction was applied using the selected reference .s2p measurement.")
         self._populate_summary(result)
         self._plot_result(result)
         self.run_button.setEnabled(True)
+        self.preprocessing_completed.emit(result)
 
     def _populate_summary(self, result: PreprocessingResult) -> None:
         info = result.quality_report.to_display_dict()
+        if result.validation_report is not None:
+            info.update(result.validation_report.to_display_dict())
         self.summary_table.setRowCount(len(info))
         for row, (key, value) in enumerate(info.items()):
             self.summary_table.setItem(row, 0, QTableWidgetItem(str(key)))
@@ -265,6 +398,10 @@ class PreprocessingPanel(QWidget):
         self.summary_table.resizeColumnsToContents()
 
     def _plot_result(self, result: PreprocessingResult) -> None:
+        if result.touchstone_s21_result is not None:
+            self._plot_touchstone_result(result)
+            return
+
         self.figure.clear()
 
         freqs_ghz = result.original_dataset.frequencies / 1e9
@@ -312,6 +449,69 @@ class PreprocessingPanel(QWidget):
         self.figure.tight_layout()
         self.canvas.draw()
 
+    def _plot_touchstone_result(self, result: PreprocessingResult) -> None:
+        self.figure.clear()
+
+        touchstone = result.touchstone_s21_result
+        raw_freqs_ghz = touchstone.raw_frequencies_hz / 1e9
+        uniform_freqs_ghz = touchstone.uniform_frequencies_hz / 1e9
+
+        ax1 = self.figure.add_subplot(3, 2, 1)
+        ax1.plot(raw_freqs_ghz, touchstone.raw_magnitude_db, color="tab:blue")
+        ax1.set_title("Raw S21 Magnitude")
+        ax1.set_xlabel("Frequency (GHz)")
+        ax1.set_ylabel("Magnitude (dB)")
+        ax1.grid(True, alpha=0.3)
+
+        ax2 = self.figure.add_subplot(3, 2, 2)
+        ax2.plot(raw_freqs_ghz, touchstone.wrapped_phase_deg, label="Wrapped", alpha=0.8)
+        ax2.plot(raw_freqs_ghz, touchstone.unwrapped_phase_deg, label="Unwrapped", alpha=0.8)
+        ax2.set_title("S21 Phase")
+        ax2.set_xlabel("Frequency (GHz)")
+        ax2.set_ylabel("Phase (deg)")
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3)
+
+        ax3 = self.figure.add_subplot(3, 2, 3)
+        ax3.plot(raw_freqs_ghz, touchstone.raw_s21.real, label="Raw Real", alpha=0.8)
+        ax3.plot(uniform_freqs_ghz, touchstone.filtered_s21.real, label="Filtered Real", alpha=0.8)
+        ax3.set_title("Real Part")
+        ax3.set_xlabel("Frequency (GHz)")
+        ax3.set_ylabel("Real(S21)")
+        ax3.legend(fontsize=8)
+        ax3.grid(True, alpha=0.3)
+
+        ax4 = self.figure.add_subplot(3, 2, 4)
+        ax4.plot(raw_freqs_ghz, touchstone.raw_s21.imag, label="Raw Imag", alpha=0.8)
+        ax4.plot(uniform_freqs_ghz, touchstone.filtered_s21.imag, label="Filtered Imag", alpha=0.8)
+        ax4.set_title("Imaginary Part")
+        ax4.set_xlabel("Frequency (GHz)")
+        ax4.set_ylabel("Imag(S21)")
+        ax4.legend(fontsize=8)
+        ax4.grid(True, alpha=0.3)
+
+        ax5 = self.figure.add_subplot(3, 2, 5)
+        ax5.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.corrected_s21) + 1e-12), label="Corrected", alpha=0.75)
+        ax5.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.filtered_s21) + 1e-12), label="Filtered", alpha=0.75)
+        ax5.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.windowed_s21) + 1e-12), label="Hamming", alpha=0.75)
+        ax5.set_title("Processed Variants")
+        ax5.set_xlabel("Frequency (GHz)")
+        ax5.set_ylabel("Magnitude (dB)")
+        ax5.legend(fontsize=8)
+        ax5.grid(True, alpha=0.3)
+
+        ax6 = self.figure.add_subplot(3, 2, 6)
+        ax6.plot(raw_freqs_ghz, 20 * np.log10(np.abs(touchstone.raw_s21) + 1e-12), label="Raw", alpha=0.75)
+        ax6.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.filtered_s21) + 1e-12), label="Processed", alpha=0.75)
+        ax6.set_title("Raw vs Processed")
+        ax6.set_xlabel("Frequency (GHz)")
+        ax6.set_ylabel("Magnitude (dB)")
+        ax6.legend(fontsize=8)
+        ax6.grid(True, alpha=0.3)
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
 
 class MainWindow(QMainWindow):
     """
@@ -322,20 +522,28 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Microwave Imaging Framework — Data Acquisition & Preprocessing")
-        self.resize(1150, 850)
+        self.setWindowTitle("Microwave Imaging Framework — Data Acquisition, Preprocessing & Reconstruction")
+        self.resize(1150, 950)
 
         self.upload_page = UploadPage()
         self.preprocessing_panel = PreprocessingPanel()
+        self.reconstruction_panel = ReconstructionPanel()
 
         tabs = QTabWidget()
         tabs.addTab(self.upload_page, "1. Data Acquisition")
         tabs.addTab(self.preprocessing_panel, "2. Signal Preprocessing")
+        tabs.addTab(self.reconstruction_panel, "3. Reconstruction")
         self.setCentralWidget(tabs)
 
         self.upload_page.dataset_loaded.connect(self._on_dataset_loaded)
+        self.preprocessing_panel.preprocessing_completed.connect(self._on_preprocessing_completed)
         self._tabs = tabs
 
     def _on_dataset_loaded(self, dataset: MicrowaveDataset) -> None:
         self.preprocessing_panel.set_dataset(dataset)
+        self.reconstruction_panel.set_dataset(dataset)
         self._tabs.setCurrentWidget(self.preprocessing_panel)
+
+    def _on_preprocessing_completed(self, result: PreprocessingResult) -> None:
+        self.reconstruction_panel.set_processed_dataset(result.processed_dataset)
+        self._tabs.setCurrentWidget(self.reconstruction_panel)

@@ -27,7 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_loader.dataset_info import build_summary
 from data_loader.loader import load_dataset
 from data_loader.matlab_loader import load_matlab_dataset
-from data_loader.touchstone_loader import load_touchstone_dataset
+from data_loader.physical_metadata import extract_physical_metadata_from_text
+from data_loader.touchstone_loader import (
+    load_touchstone_dataset,
+    load_touchstone_s21_trace,
+    parse_touchstone_header,
+)
 from data_loader.validator import (
     validate_dataset,
     validate_file_path,
@@ -257,6 +262,30 @@ class TestTouchstoneLoader(unittest.TestCase):
         dataset = load_dataset(os.path.join(DATASETS_DIR, "sample_touchstone.s2p"))
         self.assertIn("Touchstone", dataset.file_type)
 
+    def test_parse_touchstone_header(self):
+        header = parse_touchstone_header(os.path.join(DATASETS_DIR, "sample_touchstone.s2p"))
+        self.assertEqual(header.frequency_unit, "GHZ")
+        self.assertEqual(header.data_format, "RI")
+        self.assertAlmostEqual(header.reference_impedance_ohm, 50.0)
+        self.assertEqual(header.n_frequency_samples, 201)
+        self.assertAlmostEqual(header.start_frequency_hz, 1e9)
+        self.assertAlmostEqual(header.end_frequency_hz, 9e9)
+
+    def test_load_touchstone_s21_trace_db_angle(self):
+        path = os.path.join(DATASETS_DIR, "_test_db_angle.s2p")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("# MHz S DB R 75\n")
+            handle.write("1000 0 0 -6 90 -6 -90 0 0\n")
+            handle.write("2000 0 0 -20 180 -20 -180 0 0\n")
+        try:
+            frequencies_hz, s21, header = load_touchstone_s21_trace(path)
+            np.testing.assert_allclose(frequencies_hz, np.array([1e9, 2e9]))
+            self.assertEqual(header.data_format, "DB")
+            np.testing.assert_allclose(s21[0], 10 ** (-6 / 20) * 1j, atol=1e-9)
+            np.testing.assert_allclose(s21[1], -0.1 + 0j, atol=1e-9)
+        finally:
+            os.remove(path)
+
     def test_unified_loader_dispatches_matlab(self):
         dataset = load_dataset(os.path.join(DATASETS_DIR, "sample_matlab.mat"))
         self.assertIn("MATLAB", dataset.file_type)
@@ -270,6 +299,19 @@ class TestTouchstoneLoader(unittest.TestCase):
                 load_dataset(bad_path)
         finally:
             os.remove(bad_path)
+
+
+class TestPhysicalMetadataParsing(unittest.TestCase):
+    def test_extract_physical_metadata_from_text(self):
+        text = (
+            "antenna radius=8 cm; wave speed=2.1e8 m/s; "
+            "x span=-6 cm to 6 cm; y span=-4 cm to 4 cm"
+        )
+        metadata = extract_physical_metadata_from_text(text)
+        self.assertAlmostEqual(metadata["antenna_radius_m"], 0.08)
+        self.assertAlmostEqual(metadata["wave_speed_m_per_s"], 2.1e8)
+        self.assertEqual(metadata["reconstruction_x_span_m"], (-0.06, 0.06))
+        self.assertEqual(metadata["reconstruction_y_span_m"], (-0.04, 0.04))
 
 
 if __name__ == "__main__":

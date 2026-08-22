@@ -25,6 +25,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_loader.dataset_info import MicrowaveDataset
+from data_loader.touchstone_loader import load_touchstone_dataset
 from preprocessing.artifact_suppression import (
     apply_artifact_suppression,
     background_subtraction,
@@ -35,6 +36,8 @@ from preprocessing.calibration import apply_calibration, reference_calibration, 
 from preprocessing.filtering import (
     apply_noise_filter,
     butterworth_lowpass_filter,
+    gaussian_smoothing_filter,
+    median_smoothing_filter,
     moving_average_filter,
     savitzky_golay_filter,
 )
@@ -84,6 +87,14 @@ class TestFiltering(unittest.TestCase):
 
     def test_butterworth_preserves_shape(self):
         out = butterworth_lowpass_filter(self.s, cutoff=0.3, order=4)
+        self.assertEqual(out.shape, self.s.shape)
+
+    def test_gaussian_preserves_shape(self):
+        out = gaussian_smoothing_filter(self.s, sigma=1.2)
+        self.assertEqual(out.shape, self.s.shape)
+
+    def test_median_preserves_shape(self):
+        out = median_smoothing_filter(self.s, kernel_size=5)
         self.assertEqual(out.shape, self.s.shape)
 
     def test_empty_array_raises(self):
@@ -224,6 +235,120 @@ class TestPipeline(unittest.TestCase):
         )
         result = run_preprocessing_pipeline(self.dataset, config)
         np.testing.assert_array_equal(result.processed_dataset.s_parameters, self.s)
+
+
+class TestTouchstoneS21Pipeline(unittest.TestCase):
+    def _write_touchstone(self, filename: str, body: str) -> str:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "datasets",
+            filename,
+        )
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        return path
+
+    def test_touchstone_pipeline_interpolates_to_uniform_grid(self):
+        path = self._write_touchstone(
+            "_test_nonuniform_touchstone.s2p",
+            "\n".join(
+                [
+                    "# GHz S RI R 50",
+                    "1.0 0 0 1.0 0.0 0 0 0 0",
+                    "1.3 0 0 1.1 0.1 0 0 0 0",
+                    "1.9 0 0 5.0 5.0 0 0 0 0",
+                    "2.2 0 0 1.2 0.2 0 0 0 0",
+                ]
+            ),
+        )
+        try:
+            dataset = load_touchstone_dataset(path)
+            result = run_preprocessing_pipeline(dataset, PreprocessingConfig(filter_method="median"))
+            self.assertEqual(result.processed_dataset.s_parameters.shape[1], 1)
+            self.assertTrue(np.all(np.diff(result.processed_dataset.frequencies) > 0))
+            self.assertTrue(np.allclose(np.diff(result.processed_dataset.frequencies), np.diff(result.processed_dataset.frequencies)[0]))
+            self.assertIsNotNone(result.validation_report)
+            self.assertTrue(result.validation_report.interpolation_performed)
+            self.assertIn("Windowed", result.stage_outputs)
+        finally:
+            os.remove(path)
+
+    def test_touchstone_pipeline_unwraps_phase_and_reports_skipped_reference(self):
+        path = self._write_touchstone(
+            "_test_phase_wrap_touchstone.s2p",
+            "\n".join(
+                [
+                    "# GHz S MA R 50",
+                    "1.0 0 0 1.0 160 0 0 0 0",
+                    "1.1 0 0 1.0 170 0 0 0 0",
+                    "1.2 0 0 1.0 179 0 0 0 0",
+                    "1.3 0 0 1.0 -175 0 0 0 0",
+                ]
+            ),
+        )
+        try:
+            dataset = load_touchstone_dataset(path)
+            result = run_preprocessing_pipeline(dataset, PreprocessingConfig(filter_method="none"))
+            self.assertIsNotNone(result.touchstone_s21_result)
+            self.assertGreaterEqual(result.validation_report.phase_unwrap_adjustments, 1)
+            self.assertAlmostEqual(result.touchstone_s21_result.unwrapped_phase_deg[-1], 185.0, delta=1.0)
+            self.assertFalse(result.validation_report.reference_subtraction_performed)
+            self.assertTrue(result.validation_report.normalized_copy_generated)
+        finally:
+            os.remove(path)
+
+    def test_touchstone_pipeline_applies_averaging_and_reference_subtraction(self):
+        primary = self._write_touchstone(
+            "_test_primary_touchstone.s2p",
+            "\n".join(
+                [
+                    "# GHz S RI R 50",
+                    "1.0 0 0 1.0 0.0 0 0 0 0",
+                    "1.1 0 0 1.0 0.0 0 0 0 0",
+                ]
+            ),
+        )
+        repeated = self._write_touchstone(
+            "_test_repeated_touchstone.s2p",
+            "\n".join(
+                [
+                    "# GHz S RI R 50",
+                    "1.0 0 0 3.0 0.0 0 0 0 0",
+                    "1.1 0 0 3.0 0.0 0 0 0 0",
+                ]
+            ),
+        )
+        reference = self._write_touchstone(
+            "_test_reference_touchstone.s2p",
+            "\n".join(
+                [
+                    "# GHz S RI R 50",
+                    "1.0 0 0 0.5 0.0 0 0 0 0",
+                    "1.1 0 0 0.5 0.0 0 0 0 0",
+                ]
+            ),
+        )
+        try:
+            dataset = load_touchstone_dataset(primary)
+            repeated_dataset = load_touchstone_dataset(repeated)
+            reference_dataset = load_touchstone_dataset(reference)
+            result = run_preprocessing_pipeline(
+                dataset,
+                PreprocessingConfig(
+                    filter_method="none",
+                    repeated_measurements=[repeated_dataset],
+                    reference_dataset=reference_dataset,
+                ),
+            )
+            np.testing.assert_allclose(result.touchstone_s21_result.averaged_s21, np.array([2.0 + 0j, 2.0 + 0j]))
+            np.testing.assert_allclose(result.touchstone_s21_result.reference_subtracted_s21, np.array([1.5 + 0j, 1.5 + 0j]))
+            np.testing.assert_allclose(result.processed_dataset.s_parameters[:, 0], np.array([1.5 + 0j, 1.5 + 0j]))
+            self.assertTrue(result.validation_report.averaging_performed)
+            self.assertTrue(result.validation_report.reference_subtraction_performed)
+        finally:
+            os.remove(primary)
+            os.remove(repeated)
+            os.remove(reference)
 
 
 if __name__ == "__main__":
