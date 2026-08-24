@@ -27,3 +27,13 @@ Thumbs.db
 # Local / generated
 *.log
 .cursor/
+
+# Large UM-BMID frequency cubes (download separately; keep metadata lists if small)
+project/datasets/fd_data_*.mat
+**/fd_data_s11*.mat
+**/fd_data_s21*.mat
+
+# Session report archives (regenerated locally; docs describe how)
+project/results/session_report_*
+project/results/latest_session_report*
+project/session_report_*

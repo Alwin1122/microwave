@@ -12,6 +12,17 @@ Desktop PySide6 application with three modules:
 
 Brief sources (kept alongside the local project folder): `Module_2_Signal_Preprocessing_Bullets_for_UG_Students.pdf`, `Signal Preprocessing_21082026.pdf`.
 
+### UM-BMID breast scans
+
+Place clean cubes in `datasets/`, e.g. `fd_data_s21_adi.mat` + matching `md_list_s21_adi.mat`.
+
+> Large `fd_data_*.mat` cubes are **gitignored** (~220 MB). Download from UM-BMID / IEEE DataPort and place them locally. See `docs/BMID_DEVELOPMENT_STEPS.md` for the full step-by-step integration and experiment log.
+
+- Loading a BMID `fd_data_*.mat` opens a **scan picker** (tumor / healthy filter).
+- Each scan becomes a `(1001 × 72)` `MicrowaveDataset` with **1–8 GHz** frequency axis and **antenna radius 18 cm** from metadata.
+- Tumor ground truth (`tum_x`, `tum_y`) is drawn as a green **X** on reconstruction plots.
+- Because `_adi` data is already reference-subtracted, use mild filtering in Module 2; avoid treating the whole 200-scan cube as one measurement.
+- Module 3 includes **Auto Tweak Settings** (geometry + beamformer search) while keeping all manual controls.
 ---
 
 ## 1. Folder Structure
@@ -29,6 +40,7 @@ gui/
 data_loader/
     loader.py                    # Unified load_dataset() dispatcher
     matlab_loader.py             # .mat (legacy + v7.3/HDF5)
+    bmid_loader.py               # UM-BMID fd_data scan extract + metadata
     touchstone_loader.py         # .sNp + S21-only .s2p helpers
     validator.py
     dataset_info.py              # MicrowaveDataset / DatasetSummary
@@ -78,6 +90,7 @@ Tabs:
 1. **Data Acquisition** — Load Dataset (`.mat` / `.sNp`). Sample files live in `datasets/`.
 2. **Signal Preprocessing** — Configure filters; for `.s2p` optionally select **repeated** and **reference** files, then Run Preprocessing.
 3. **Reconstruction** — Choose processed or raw source, grid / radius / wave speed, run DAS·DMAS·DMAS-D4, view ROI refine.
+4. **Download Final Report** — optional copy-to-folder. Reports are also **auto-saved** after preprocessing and reconstruction to `results/latest_session_report.md` (+ `.json` / PNGs), with a timestamped archive copy each run.
 
 ### Sample datasets
 
@@ -192,9 +205,10 @@ Cited method support in the work plan: Blanco-Angulo et al. (Biosensors 2022); H
 
 - Frequency → time: `reconstruction/ifft.py`
 - Beamformers: DAS, DMAS, DMAS-D4 (`reconstruction/`)
-- Manager: circular array fallback, config from metadata, ROI high-res refine
-- Quality pick: `quality/beamformer_selector.py`
-- ROI: `roi/roi_detector.py`
+- Manager: circular array with **angle offset / CW / axis flip / 355° BMID arc**, optional **phase-delay radius** (UM-BMID)
+- Quality pick: `quality/beamformer_selector.py` — modes: quality score, prefer DMAS-D4, closest to tumor GT, force DAS/DMAS/DMAS-D4
+- ROI: `roi/roi_detector.py` — peak score or prefer off-center (suppresses origin ring clutter)
+- Auto Tweak: `reconstruction/auto_calibrate.py` — DAS coarse geometry sweep + full beamformer refine; GUI button applies best settings to manual controls
 - GUI: `gui/reconstruction_page.py`
 
 ---
@@ -224,3 +238,4 @@ Errors show in the Status Log and a `QMessageBox`; the app should not crash on i
 3. Implement Week 3 S21 path: IFFT, time-domain ref subtract, optional channel clutter, `.mat` export with Tx/Rx coords.
 4. Report **NRMSE** by name; distinguish Hampel vs median vs local spike detectors.
 5. Align subtract/window order with the work-plan PDF if that brief is authoritative for grading.
+6. Sweep antenna angle offset / flips on BMID tumor scans until ROI↔GT is consistently &lt;1.5 cm.

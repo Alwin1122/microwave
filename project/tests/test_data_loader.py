@@ -227,22 +227,21 @@ class TestMatlabLoader(unittest.TestCase):
             os.remove(path)
 
     def test_known_dataset_fallback_um_bmid(self):
-        """Regression test: files like UM-BMID's fd_data_s11.mat contain
-        an S-parameter array with NO frequency vector at all, because the
-        sweep is a fixed, documented system property. The loader should
-        recognize this known variable name/shape and synthesize the
-        correct 1-9 GHz / 1001-point frequency axis rather than failing."""
+        """UM-BMID fd_data cubes omit a frequency vector and store many scans.
+        Loading requires an explicit scan_index and synthesizes 1-8 GHz / 1001 pts."""
         from scipy.io import savemat
 
         path = os.path.join(DATASETS_DIR, "_test_umbmid.mat")
-        # mismatched scan/antenna-position dims, like the real (249, 1001, 72) file
-        data = np.random.randn(5, 1001, 4)
+        data = np.random.randn(5, 1001, 4) + 1j * np.random.randn(5, 1001, 4)
         savemat(path, {"fd_data_s11": data})
         try:
-            dataset = load_matlab_dataset(path)
+            with self.assertRaises(Exception):
+                load_matlab_dataset(path)  # scan selection required
+            dataset = load_matlab_dataset(path, scan_index=0)
             self.assertEqual(dataset.n_frequencies, 1001)
-            np.testing.assert_allclose(dataset.freq_range_hz, (1e9, 9e9))
-            self.assertEqual(dataset.s_parameters.shape, (1001, 20))
+            np.testing.assert_allclose(dataset.freq_range_hz, (1e9, 8e9))
+            self.assertEqual(dataset.s_parameters.shape, (1001, 4))
+            self.assertAlmostEqual(dataset.metadata["antenna_radius_m"], 0.18, places=6)
         finally:
             os.remove(path)
 

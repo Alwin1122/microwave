@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from roi.roi_detector import detect_roi
+from roi.roi_detector import detect_roi, roi_centroid_meters
 
 
 class TestROIDetector(unittest.TestCase):
@@ -28,6 +28,31 @@ class TestROIDetector(unittest.TestCase):
         self.assertTrue(result.mask.any())
         self.assertAlmostEqual(result.centroid[0], 9.0, delta=2.0)
         self.assertAlmostEqual(result.centroid[1], 7.0, delta=2.0)
+
+    def test_prefer_off_center_avoids_origin_blob(self):
+        image = np.zeros((64, 64), dtype=float)
+        image[28:36, 28:36] = 3.0  # bright center clutter
+        image[12:18, 44:50] = 2.5  # weaker off-center target
+        peak = detect_roi(image, threshold_ratio=0.5, min_area=4, margin=1, sigma=0.5)
+        off = detect_roi(
+            image,
+            threshold_ratio=0.5,
+            min_area=4,
+            margin=1,
+            sigma=0.5,
+            prefer_off_center=True,
+            off_center_weight=3.0,
+        )
+        self.assertLess(abs(peak.centroid[0] - 31.5), 6.0)
+        self.assertGreater(abs(off.centroid[0] - 31.5), 8.0)
+
+    def test_roi_centroid_meters(self):
+        image = np.zeros((11, 11), dtype=float)
+        image[8, 2] = 1.0
+        roi = detect_roi(image, threshold_ratio=0.5, min_area=1, margin=0, sigma=0.1)
+        x_m, y_m = roi_centroid_meters(roi, image.shape, (-0.05, 0.05), (-0.05, 0.05))
+        self.assertAlmostEqual(x_m, -0.03, places=2)
+        self.assertAlmostEqual(y_m, 0.03, places=2)
 
 
 if __name__ == "__main__":

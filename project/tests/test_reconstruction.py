@@ -11,6 +11,7 @@ from reconstruction.dmas import dmas_reconstruct
 from reconstruction.dmas_d4 import dmas_d4_reconstruct
 from reconstruction.reconstruction_manager import (
     ROIRefinement,
+    bmid_phase_delayed_radius,
     build_circular_antenna_array,
     infer_reconstruction_assessment,
     infer_reconstruction_config,
@@ -173,6 +174,30 @@ class TestReconstructionConfig(unittest.TestCase):
         self.assertEqual(assessment.config.wave_speed, 3e8)
         self.assertTrue(assessment.warnings)
         self.assertIn("default", " ".join(assessment.warnings).lower())
+
+    def test_bmid_defaults_and_geometry_helpers(self):
+        delayed = bmid_phase_delayed_radius(0.18)
+        self.assertAlmostEqual(delayed, 0.97 * (0.18 - 0.106) + 0.148, places=6)
+
+        pos = build_circular_antenna_array(4, radius=1.0, angle_offset_deg=90.0)
+        self.assertAlmostEqual(pos[0, 0], 0.0, places=6)
+        self.assertAlmostEqual(pos[0, 1], 1.0, places=6)
+
+        flipped = build_circular_antenna_array(4, radius=1.0, flip_x=True)
+        self.assertAlmostEqual(flipped[0, 0], -1.0, places=6)
+
+        dataset = MicrowaveDataset(
+            file_path="fd_data_s21_adi.mat",
+            file_name="fd_data_s21_adi.mat",
+            file_type="MATLAB (UM-BMID)",
+            frequencies=np.linspace(1e9, 8e9, 10),
+            s_parameters=np.ones((10, 4), dtype=complex),
+            n_ports=4,
+            metadata={"dataset_family": "UM-BMID", "antenna_radius_m": 0.18},
+        )
+        assessment = infer_reconstruction_assessment(dataset)
+        self.assertAlmostEqual(assessment.config.antenna_span_deg, 360.0)
+        self.assertFalse(assessment.config.use_bmid_phase_delay_radius)
 
 
 if __name__ == "__main__":

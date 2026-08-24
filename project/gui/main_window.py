@@ -24,6 +24,9 @@ Description:
 
 from __future__ import annotations
 
+import os
+from datetime import datetime
+
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -43,6 +46,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -58,6 +62,7 @@ from preprocessing.preprocessing_pipeline import (
 )
 from utils.exceptions import MicrowaveFrameworkError
 from utils.logger import StatusLog, get_logger
+from utils.session_report import SessionReportContext, write_session_report
 
 logger = get_logger(__name__)
 
@@ -528,6 +533,7 @@ class MainWindow(QMainWindow):
         self.upload_page = UploadPage()
         self.preprocessing_panel = PreprocessingPanel()
         self.reconstruction_panel = ReconstructionPanel()
+        self._session_dataset: MicrowaveDataset | None = None
 
         tabs = QTabWidget()
         tabs.addTab(self.upload_page, "1. Data Acquisition")
@@ -535,15 +541,152 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.reconstruction_panel, "3. Reconstruction")
         self.setCentralWidget(tabs)
 
+        toolbar = QToolBar("Session")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        self.report_action = toolbar.addAction("Download Final Report")
+        self.report_action.setToolTip(
+            "Copy the latest auto-saved report (and figures) to a folder you choose"
+        )
+        self.report_action.triggered.connect(self._download_final_report)
+        self.auto_report_label = QLabel("Auto-report: waiting for pipeline…")
+        self.auto_report_label.setStyleSheet("color: #555; padding-left: 12px;")
+        toolbar.addWidget(self.auto_report_label)
+
         self.upload_page.dataset_loaded.connect(self._on_dataset_loaded)
         self.preprocessing_panel.preprocessing_completed.connect(self._on_preprocessing_completed)
+        self.reconstruction_panel.export_report_button.clicked.connect(self._download_final_report)
+        self.reconstruction_panel.reconstruction_completed.connect(self._on_reconstruction_completed)
         self._tabs = tabs
+        self._results_dir = os.path.join(os.getcwd(), "results")
+        self._latest_report_paths: dict[str, str] = {}
 
     def _on_dataset_loaded(self, dataset: MicrowaveDataset) -> None:
+        self._session_dataset = dataset
         self.preprocessing_panel.set_dataset(dataset)
         self.reconstruction_panel.set_dataset(dataset)
+        self.reconstruction_panel.last_snapshot = None
+        self.reconstruction_panel.export_report_button.setEnabled(False)
         self._tabs.setCurrentWidget(self.preprocessing_panel)
+        self.auto_report_label.setText("Auto-report: dataset loaded — run preprocess/reconstruct")
 
     def _on_preprocessing_completed(self, result: PreprocessingResult) -> None:
         self.reconstruction_panel.set_processed_dataset(result.processed_dataset)
         self._tabs.setCurrentWidget(self.reconstruction_panel)
+        self._autosave_session_report(reason="preprocessing")
+
+    def _on_reconstruction_completed(self, _snapshot) -> None:
+        self.reconstruction_panel.export_report_button.setEnabled(True)
+        self._autosave_session_report(reason="reconstruction")
+
+    def _build_report_context(self) -> SessionReportContext | None:
+        dataset = self._session_dataset or self.reconstruction_panel.dataset
+        preprocessing = self.preprocessing_panel.last_result
+        reconstruction = self.reconstruction_panel.last_snapshot
+        if dataset is None and preprocessing is None and reconstruction is None:
+            return None
+        return SessionReportContext(
+            dataset=dataset,
+            preprocessing=preprocessing,
+            reconstruction=reconstruction,
+        )
+
+    def _autosave_session_report(self, reason: str) -> None:
+        """Rewrite results/latest_session_report.* plus a timestamped archive copy."""
+        ctx = self._build_report_context()
+        if ctx is None:
+            return
+
+        try:
+            os.makedirs(self._results_dir, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_stem = f"session_report_{stamp}"
+            figure_paths: list[str] = []
+            if ctx.reconstruction is not None:
+                figure_paths = self.reconstruction_panel.save_figures(
+                    self._results_dir, "latest_session_report"
+                )
+                # Also keep timestamped figure copies next to the archive report.
+                self.reconstruction_panel.save_figures(self._results_dir, archive_stem)
+
+            latest_paths = write_session_report(
+                ctx,
+                output_dir=self._results_dir,
+                basename="latest_session_report",
+                figure_paths=figure_paths,
+            )
+            archive_paths = write_session_report(
+                ctx,
+                output_dir=self._results_dir,
+                basename=archive_stem,
+                figure_paths=[
+                    os.path.join(self._results_dir, f"{archive_stem}_selected.png"),
+                    os.path.join(self._results_dir, f"{archive_stem}_beamformers.png"),
+                    os.path.join(self._results_dir, f"{archive_stem}_roi_refine.png"),
+                ]
+                if ctx.reconstruction is not None
+                else None,
+            )
+            self._latest_report_paths = latest_paths
+            self.auto_report_label.setText(
+                f"Auto-report updated ({reason}): results/latest_session_report.md"
+            )
+            logger.info(
+                "Auto-saved session report (%s) to %s and %s",
+                reason,
+                latest_paths["markdown"],
+                archive_paths["markdown"],
+            )
+        except Exception:
+            logger.exception("Auto-save of session report failed")
+            self.auto_report_label.setText("Auto-report: save failed (see log)")
+
+    def _download_final_report(self) -> None:
+        ctx = self._build_report_context()
+        if ctx is None:
+            QMessageBox.information(
+                self,
+                "Nothing to Export",
+                "Load a dataset (and optionally run preprocessing / reconstruction) before downloading a report.",
+            )
+            return
+
+        # Ensure latest files exist / are fresh before offering a copy.
+        self._autosave_session_report(reason="manual-export")
+
+        default_dir = self._results_dir
+        os.makedirs(default_dir, exist_ok=True)
+        target_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Choose folder to copy the final report",
+            default_dir,
+        )
+        if not target_dir:
+            return
+
+        try:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_stem = f"session_report_{stamp}"
+            figure_paths: list[str] = []
+            if ctx.reconstruction is not None:
+                figure_paths = self.reconstruction_panel.save_figures(target_dir, file_stem)
+            paths = write_session_report(
+                ctx,
+                output_dir=target_dir,
+                basename=file_stem,
+                figure_paths=figure_paths,
+            )
+            message = (
+                f"Report copied:\n\n"
+                f"Markdown: {paths['markdown']}\n"
+                f"JSON: {paths['json']}\n\n"
+                f"Also always auto-updated at:\n"
+                f"{os.path.join(self._results_dir, 'latest_session_report.md')}"
+            )
+            if figure_paths:
+                message += "\nFigures:\n- " + "\n- ".join(figure_paths)
+            QMessageBox.information(self, "Final Report Saved", message)
+            logger.info("Session report written to %s", paths["markdown"])
+        except Exception as exc:
+            logger.exception("Failed to write session report")
+            QMessageBox.critical(self, "Report Export Failed", str(exc))

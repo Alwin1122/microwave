@@ -57,13 +57,12 @@ _SPARAM_NAME_HINTS = ("s_param", "sparam", "s11", "s21", "s_matrix", "smat", "s_
 # variable names are mapped to their documented frequency sweep here.
 # Keyed by lowercased variable name; value is (start_hz, stop_hz, n_points).
 #
-# 'fd_data_s11' -> University of Manitoba Breast Microwave Imaging
-#   Dataset (UM-BMID), generation 3: measurements taken at 1001
-#   frequencies swept over 1-9 GHz using a Copper Mountain C1209 VNA.
-#   Source: Reimer & Fear et al., "An Optimization-Based Approach to
-#   Radar Image Reconstruction in Breast Microwave Sensing", PMC8704509.
+# UM-BMID clean frequency-domain cubes omit an explicit frequency vector.
+# Official examples (UM-BMID run/data_use_ex.py) use 1-8 GHz with 1001 points.
+# Multi-scan cubes must be sliced via data_loader.bmid_loader.load_bmid_scan.
 _KNOWN_DATASET_FREQUENCY_SWEEPS = {
-    "fd_data_s11": (1e9, 9e9, 1001),
+    "fd_data_s11": (1e9, 8e9, 1001),
+    "fd_data_s21": (1e9, 8e9, 1001),
 }
 
 
@@ -254,12 +253,13 @@ def _try_known_dataset_fallback(numeric_vars: dict) -> tuple[str, np.ndarray, st
     return None
 
 
-def load_matlab_dataset(file_path: str) -> MicrowaveDataset:
+def load_matlab_dataset(file_path: str, scan_index: int | None = None) -> MicrowaveDataset:
     """
     Purpose:
         Load a .mat file (any MATLAB version) into a MicrowaveDataset.
     Input:
         file_path (str): path to the .mat file.
+        scan_index (int | None): required for multi-scan UM-BMID fd_data cubes.
     Output:
         MicrowaveDataset with frequencies, s_parameters, n_ports and
         available_variables populated.
@@ -269,6 +269,24 @@ def load_matlab_dataset(file_path: str) -> MicrowaveDataset:
     """
     validate_file_path(file_path)
     logger.info(f"Loading MATLAB dataset: {file_path}")
+
+    # UM-BMID multi-scan cubes need an explicit scan index and companion metadata.
+    from data_loader.bmid_loader import (
+        ScanSelectionRequiredError,
+        is_bmid_fd_filename,
+        list_bmid_scans,
+        load_bmid_scan,
+    )
+
+    if is_bmid_fd_filename(file_path):
+        scans = list_bmid_scans(file_path)
+        if scan_index is None:
+            raise ScanSelectionRequiredError(
+                f"'{os.path.basename(file_path)}' is a UM-BMID multi-scan cube "
+                f"with {len(scans)} scans. Select a scan index before loading.",
+                n_scans=len(scans),
+            )
+        return load_bmid_scan(file_path, scan_index)
 
     if _is_legacy_mat(file_path):
         variables = _load_legacy_mat(file_path)
@@ -326,7 +344,21 @@ def load_matlab_dataset(file_path: str) -> MicrowaveDataset:
         freq_name, frequencies, sparam_name, sparam_raw = known
         n_freq = frequencies.shape[0]
 
-    s_parameters = _orient_s_parameters(np.squeeze(sparam_raw), n_freq)
+    sparam_squeezed = np.squeeze(sparam_raw)
+    # Guard: known-sweep fallback can still hit a BMID-style 3D cube saved under
+    # a matching variable name without the standard filename.
+    if sparam_squeezed.ndim == 3 and n_freq in sparam_squeezed.shape:
+        n_scans = int(sparam_squeezed.shape[0] if sparam_squeezed.shape[1] == n_freq else -1)
+        if n_scans > 1:
+            if scan_index is None:
+                raise ScanSelectionRequiredError(
+                    f"Variable '{sparam_name}' looks like a multi-scan BMID cube "
+                    f"with {n_scans} scans. Select a scan index before loading.",
+                    n_scans=n_scans,
+                )
+            return load_bmid_scan(file_path, scan_index)
+
+    s_parameters = _orient_s_parameters(sparam_squeezed, n_freq)
     if not np.iscomplexobj(s_parameters):
         s_parameters = s_parameters.astype(complex)
 

@@ -18,18 +18,23 @@ Output:
 Description:
     This widget owns no preprocessing logic; it is purely responsible for
     Module 1 concerns (loading, validating, and displaying dataset info).
+    UM-BMID fd_data cubes open a scan-selection dialog before loading.
 """
 
 from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -39,6 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from data_loader.bmid_loader import BmidScanInfo, is_bmid_fd_filename, list_bmid_scans
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.loader import load_dataset_with_summary
 from utils.exceptions import MicrowaveFrameworkError
@@ -52,6 +58,66 @@ SUPPORTED_FILE_FILTER = (
     "Touchstone Files (*.s1p *.s2p *.s4p *.s8p);;"
     "All Files (*)"
 )
+
+
+class BmidScanPickerDialog(QDialog):
+    """Choose one scan from a UM-BMID multi-scan frequency-domain cube."""
+
+    def __init__(self, scans: list[BmidScanInfo], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select UM-BMID Scan")
+        self.resize(640, 420)
+        self._scans = scans
+        self.selected_index: int | None = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"{len(scans)} scans found. Pick one tumor or healthy case to load "
+                "(adipose-reference clean S21)."
+            )
+        )
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter:"))
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["All", "Tumor only", "Healthy only"])
+        self.filter_combo.currentTextChanged.connect(self._repopulate)
+        filter_row.addWidget(self.filter_combo, stretch=1)
+        layout.addLayout(filter_row)
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self.accept)
+        layout.addWidget(self.list_widget, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._repopulate()
+
+    def _repopulate(self) -> None:
+        mode = self.filter_combo.currentText()
+        self.list_widget.clear()
+        for scan in self._scans:
+            if mode == "Tumor only" and not scan.has_tumor:
+                continue
+            if mode == "Healthy only" and scan.has_tumor:
+                continue
+            self.list_widget.addItem(scan.label)
+            item = self.list_widget.item(self.list_widget.count() - 1)
+            item.setData(Qt.ItemDataRole.UserRole, scan.index)
+        if self.list_widget.count():
+            self.list_widget.setCurrentRow(0)
+
+    def accept(self) -> None:
+        item = self.list_widget.currentItem()
+        if item is None:
+            QMessageBox.warning(self, "No Scan Selected", "Please select a scan.")
+            return
+        self.selected_index = int(item.data(Qt.ItemDataRole.UserRole))
+        super().accept()
 
 
 class UploadPage(QWidget):
@@ -68,9 +134,6 @@ class UploadPage(QWidget):
         self.current_dataset: MicrowaveDataset | None = None
         self._build_ui()
 
-    # ------------------------------------------------------------------ #
-    # UI construction
-    # ------------------------------------------------------------------ #
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
@@ -78,7 +141,6 @@ class UploadPage(QWidget):
         title.setStyleSheet("font-size: 16px; font-weight: 600;")
         layout.addWidget(title)
 
-        # --- Load button row ---
         button_row = QHBoxLayout()
         self.load_button = QPushButton("Load Dataset")
         self.load_button.clicked.connect(self.on_load_dataset_clicked)
@@ -89,7 +151,6 @@ class UploadPage(QWidget):
         button_row.addWidget(self.file_label, stretch=1)
         layout.addLayout(button_row)
 
-        # --- Dataset info panel ---
         info_group = QGroupBox("Dataset Information")
         info_layout = QVBoxLayout()
         self.info_table = QTableWidget(0, 2)
@@ -101,7 +162,6 @@ class UploadPage(QWidget):
         info_group.setLayout(info_layout)
         layout.addWidget(info_group, stretch=1)
 
-        # --- Status log ---
         log_group = QGroupBox("Status Log")
         log_layout = QVBoxLayout()
         self.log_view = QPlainTextEdit()
@@ -111,25 +171,11 @@ class UploadPage(QWidget):
         log_group.setLayout(log_layout)
         layout.addWidget(log_group, stretch=1)
 
-    # ------------------------------------------------------------------ #
-    # Logic
-    # ------------------------------------------------------------------ #
     def _log(self, message: str, level: str = "INFO") -> None:
         line = self.status_log.add(message, level)
         self.log_view.appendPlainText(line)
 
     def on_load_dataset_clicked(self) -> None:
-        """
-        Purpose:
-            Handle the "Load Dataset" button: opens a file browser dialog,
-            loads and validates the selected file, updates the info panel,
-            and emits `dataset_loaded` on success.
-        Input:
-            None (triggered by Qt signal).
-        Output:
-            None. Side effect: populates info table / status log, emits
-            dataset_loaded signal, or shows an error dialog.
-        """
         start_dir = os.path.join(os.getcwd(), "datasets")
         if not os.path.isdir(start_dir):
             start_dir = os.getcwd()
@@ -138,23 +184,23 @@ class UploadPage(QWidget):
             self, "Load Microwave Dataset", start_dir, SUPPORTED_FILE_FILTER
         )
         if not file_path:
-            return  # user cancelled
+            return
 
         self.load_dataset_from_path(file_path)
 
-    def load_dataset_from_path(self, file_path: str) -> None:
-        """
-        Purpose:
-            Programmatic entry point (also used by tests) to load a
-            dataset file by path, bypassing the file dialog.
-        Input:
-            file_path (str): path to the dataset file.
-        Output:
-            None. Populates UI state; emits dataset_loaded on success.
-        """
+    def load_dataset_from_path(self, file_path: str, scan_index: int | None = None) -> None:
         self._log(f"Loading file: {file_path}")
         try:
-            dataset, summary = load_dataset_with_summary(file_path)
+            if is_bmid_fd_filename(file_path) and scan_index is None:
+                scans = list_bmid_scans(file_path)
+                dialog = BmidScanPickerDialog(scans, self)
+                if dialog.exec() != QDialog.Accepted or dialog.selected_index is None:
+                    self._log("BMID scan selection cancelled.")
+                    return
+                scan_index = dialog.selected_index
+                self._log(f"Selected BMID scan index {scan_index}: {scans[scan_index].label}")
+
+            dataset, summary = load_dataset_with_summary(file_path, scan_index=scan_index)
         except MicrowaveFrameworkError as exc:
             self._log(f"Failed to load dataset: {exc}", "ERROR")
             QMessageBox.critical(self, "Dataset Load Error", str(exc))
@@ -171,7 +217,19 @@ class UploadPage(QWidget):
 
         self.current_dataset = dataset
         self.file_label.setText(f"Loaded: {summary.file_name}")
-        self._populate_info_table(summary.to_display_dict())
+        display = summary.to_display_dict()
+        meta = dataset.metadata or {}
+        if meta.get("dataset_family") == "UM-BMID":
+            display["BMID Scan"] = str(meta.get("bmid_scan_index"))
+            display["Phantom"] = str(meta.get("bmid_phant_id", "N/A"))
+            display["Tumor"] = (
+                f"{meta['tumor_diameter_m']*100:.1f} cm @ "
+                f"({meta['tumor_x_m']*100:.2f}, {meta['tumor_y_m']*100:.2f}) cm"
+                if meta.get("bmid_has_tumor")
+                else "Healthy (no tumor)"
+            )
+            display["Antenna Radius"] = f"{meta.get('antenna_radius_m', 0)*100:.0f} cm"
+        self._populate_info_table(display)
         self._log(f"Dataset '{summary.file_name}' loaded successfully.", "SUCCESS")
         self.dataset_loaded.emit(dataset)
 
