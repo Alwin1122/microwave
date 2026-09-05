@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -47,6 +46,7 @@ from PySide6.QtWidgets import (
 from data_loader.bmid_loader import BmidScanInfo, is_bmid_fd_filename, list_bmid_scans
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.loader import load_dataset_with_summary
+from gui.styles import set_page_title, set_primary_button
 from utils.exceptions import MicrowaveFrameworkError
 from utils.logger import StatusLog, get_logger
 
@@ -63,7 +63,9 @@ SUPPORTED_FILE_FILTER = (
 class BmidScanPickerDialog(QDialog):
     """Choose one scan from a UM-BMID multi-scan frequency-domain cube."""
 
-    def __init__(self, scans: list[BmidScanInfo], parent: QWidget | None = None) -> None:
+    def __init__(
+        self, scans: list[BmidScanInfo], parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Select UM-BMID Scan")
         self.resize(640, 420)
@@ -136,40 +138,53 @@ class UploadPage(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(16)
 
-        title = QLabel("Module 1 — Data Acquisition")
-        title.setStyleSheet("font-size: 16px; font-weight: 600;")
-        layout.addWidget(title)
+        header = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title = QLabel()
+        set_page_title(title, "Data Acquisition")
+        title_col.addWidget(title)
+        subtitle = QLabel("Load MATLAB (.mat) or Touchstone (.sNp). BMID cubes open a scan picker.")
+        subtitle.setObjectName("hintLabel")
+        subtitle.setWordWrap(True)
+        title_col.addWidget(subtitle)
+        header.addLayout(title_col, stretch=1)
 
-        button_row = QHBoxLayout()
-        self.load_button = QPushButton("Load Dataset")
+        self.load_button = QPushButton("Load dataset")
+        set_primary_button(self.load_button)
         self.load_button.clicked.connect(self.on_load_dataset_clicked)
-        button_row.addWidget(self.load_button)
+        header.addWidget(self.load_button)
+        layout.addLayout(header)
 
         self.file_label = QLabel("No file loaded.")
-        self.file_label.setStyleSheet("color: #555;")
-        button_row.addWidget(self.file_label, stretch=1)
-        layout.addLayout(button_row)
+        self.file_label.setObjectName("hintLabel")
+        layout.addWidget(self.file_label)
 
-        info_group = QGroupBox("Dataset Information")
-        info_layout = QVBoxLayout()
+        body = QHBoxLayout()
+        body.setSpacing(20)
+
+        info_col = QVBoxLayout()
+        info_col.addWidget(QLabel("Dataset"))
         self.info_table = QTableWidget(0, 2)
         self.info_table.setHorizontalHeaderLabels(["Field", "Value"])
         self.info_table.horizontalHeader().setStretchLastSection(True)
         self.info_table.verticalHeader().setVisible(False)
         self.info_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        info_layout.addWidget(self.info_table)
-        info_group.setLayout(info_layout)
-        layout.addWidget(info_group, stretch=1)
+        self.info_table.setAlternatingRowColors(True)
+        info_col.addWidget(self.info_table)
+        body.addLayout(info_col, stretch=1)
 
-        log_group = QGroupBox("Status Log")
-        log_layout = QVBoxLayout()
+        log_col = QVBoxLayout()
+        log_col.addWidget(QLabel("Log"))
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
-        log_layout.addWidget(self.log_view)
-        log_group.setLayout(log_layout)
-        layout.addWidget(log_group, stretch=1)
+        log_col.addWidget(self.log_view)
+        body.addLayout(log_col, stretch=1)
+
+        layout.addLayout(body, stretch=1)
 
     def _log(self, message: str, level: str = "INFO") -> None:
         line = self.status_log.add(message, level)
@@ -188,7 +203,9 @@ class UploadPage(QWidget):
 
         self.load_dataset_from_path(file_path)
 
-    def load_dataset_from_path(self, file_path: str, scan_index: int | None = None) -> None:
+    def load_dataset_from_path(
+        self, file_path: str, scan_index: int | None = None
+    ) -> None:
         self._log(f"Loading file: {file_path}")
         try:
             if is_bmid_fd_filename(file_path) and scan_index is None:
@@ -198,9 +215,13 @@ class UploadPage(QWidget):
                     self._log("BMID scan selection cancelled.")
                     return
                 scan_index = dialog.selected_index
-                self._log(f"Selected BMID scan index {scan_index}: {scans[scan_index].label}")
+                self._log(
+                    f"Selected BMID scan index {scan_index}: {scans[scan_index].label}"
+                )
 
-            dataset, summary = load_dataset_with_summary(file_path, scan_index=scan_index)
+            dataset, summary = load_dataset_with_summary(
+                file_path, scan_index=scan_index
+            )
         except MicrowaveFrameworkError as exc:
             self._log(f"Failed to load dataset: {exc}", "ERROR")
             QMessageBox.critical(self, "Dataset Load Error", str(exc))
@@ -223,12 +244,14 @@ class UploadPage(QWidget):
             display["BMID Scan"] = str(meta.get("bmid_scan_index"))
             display["Phantom"] = str(meta.get("bmid_phant_id", "N/A"))
             display["Tumor"] = (
-                f"{meta['tumor_diameter_m']*100:.1f} cm @ "
-                f"({meta['tumor_x_m']*100:.2f}, {meta['tumor_y_m']*100:.2f}) cm"
+                f"{meta['tumor_diameter_m'] * 100:.1f} cm @ "
+                f"({meta['tumor_x_m'] * 100:.2f}, {meta['tumor_y_m'] * 100:.2f}) cm"
                 if meta.get("bmid_has_tumor")
                 else "Healthy (no tumor)"
             )
-            display["Antenna Radius"] = f"{meta.get('antenna_radius_m', 0)*100:.0f} cm"
+            display["Antenna Radius"] = (
+                f"{meta.get('antenna_radius_m', 0) * 100:.0f} cm"
+            )
         self._populate_info_table(display)
         self._log(f"Dataset '{summary.file_name}' loaded successfully.", "SUCCESS")
         self.dataset_loaded.emit(dataset)

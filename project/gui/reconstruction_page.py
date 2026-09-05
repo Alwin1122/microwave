@@ -10,24 +10,30 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QProgressBar,
     QPushButton,
-    QTabWidget,
+    QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from data_loader.dataset_info import MicrowaveDataset
+from gui.styles import set_page_title, set_primary_button
 from quality.beamformer_selector import select_best_beamformer
-from reconstruction.auto_calibrate import AutoCalibrateResult, auto_calibrate_reconstruction
+from reconstruction.auto_calibrate import (
+    AutoCalibrateResult,
+    auto_calibrate_reconstruction,
+)
 from reconstruction.reconstruction_manager import (
     ROIRefinement,
     infer_reconstruction_assessment,
@@ -58,6 +64,7 @@ class AutoCalibrateWorker(QThread):
         quick: bool,
         include_wave_speeds: bool,
         baseline_prefer_off_center: bool = False,
+        baseline_tight_peak: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -68,6 +75,7 @@ class AutoCalibrateWorker(QThread):
         self.quick = quick
         self.include_wave_speeds = include_wave_speeds
         self.baseline_prefer_off_center = baseline_prefer_off_center
+        self.baseline_tight_peak = baseline_tight_peak
 
     def run(self) -> None:
         try:
@@ -79,6 +87,7 @@ class AutoCalibrateWorker(QThread):
                 quick=self.quick,
                 include_wave_speeds=self.include_wave_speeds,
                 baseline_prefer_off_center=self.baseline_prefer_off_center,
+                baseline_tight_peak=self.baseline_tight_peak,
                 progress_callback=lambda pct, msg: self.progress_updated.emit(pct, msg),
             )
             self.finished_ok.emit(result)
@@ -105,63 +114,122 @@ class ReconstructionPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
 
-        title = QLabel("Module 3 — Reconstruction & Beamformer Selection")
-        title.setStyleSheet("font-size: 16px; font-weight: 600;")
-        layout.addWidget(title)
+        header = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title = QLabel()
+        set_page_title(title, "Reconstruction")
+        title_col.addWidget(title)
+        self.status_label = QLabel("Load a dataset to begin.")
+        self.status_label.setObjectName("hintLabel")
+        title_col.addWidget(self.status_label)
+        header.addLayout(title_col, stretch=1)
 
-        config_group = QGroupBox("Reconstruction Configuration")
-        form = QFormLayout()
+        self.run_button = QPushButton("Run")
+        set_primary_button(self.run_button)
+        self.run_button.clicked.connect(self.on_run_clicked)
+        self.run_button.setEnabled(False)
+        header.addWidget(self.run_button)
 
+        self.auto_tweak_button = QPushButton("Auto Tweak")
+        self.auto_tweak_button.setToolTip(
+            "Search geometry / ROI / beamformer, apply best settings, then reconstruct."
+        )
+        self.auto_tweak_button.clicked.connect(self.on_auto_tweak_clicked)
+        self.auto_tweak_button.setEnabled(False)
+        header.addWidget(self.auto_tweak_button)
+
+        self.export_report_button = QPushButton("Report")
+        self.export_report_button.setToolTip("Export Markdown + JSON session report")
+        self.export_report_button.setEnabled(False)
+        header.addWidget(self.export_report_button)
+        layout.addLayout(header)
+
+        self.auto_progress = QProgressBar()
+        self.auto_progress.setValue(0)
+        self.auto_progress.setVisible(False)
+        self.auto_progress.setTextVisible(False)
+        layout.addWidget(self.auto_progress)
+
+        self.content_tabs = QTabWidget()
+        layout.addWidget(self.content_tabs, stretch=1)
+
+        # --- Image ---
+        overview_tab = QWidget()
+        overview_layout = QVBoxLayout(overview_tab)
+        overview_layout.setContentsMargins(4, 12, 4, 4)
+        self.selected_figure = Figure(figsize=(7, 5.5), tight_layout=True)
+        self.selected_canvas = FigureCanvasQTAgg(self.selected_figure)
+        self.selected_canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        overview_layout.addWidget(self.selected_canvas)
+        self.content_tabs.addTab(overview_tab, "Image")
+
+        # --- Settings ---
+        settings_tab = QWidget()
+        settings_tab.setAutoFillBackground(True)
+        settings_outer = QVBoxLayout(settings_tab)
+        settings_outer.setContentsMargins(8, 16, 8, 8)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        settings_scroll.setAutoFillBackground(True)
+        settings_host = QWidget()
+        settings_host.setAutoFillBackground(True)
+        settings_host.setStyleSheet("background-color: #ffffff; color: #0f172a;")
+        settings_grid = QHBoxLayout(settings_host)
+        settings_grid.setSpacing(32)
+
+        geom = QGroupBox("Geometry")
+        geom_form = QFormLayout()
+        geom_form.setSpacing(10)
         self.data_source_combo = QComboBox()
         self.data_source_combo.addItems(["Processed Dataset", "Raw Dataset"])
-        form.addRow("Source Signal:", self.data_source_combo)
-
+        geom_form.addRow("Source", self.data_source_combo)
         self.grid_combo = QComboBox()
         self.grid_combo.addItems(["64x64", "128x128"])
-        form.addRow("Grid Resolution:", self.grid_combo)
-
+        geom_form.addRow("Grid", self.grid_combo)
         self.radius_combo = QComboBox()
         self.radius_combo.addItems(["8 cm", "10 cm", "12 cm", "18 cm"])
         self.radius_combo.setCurrentText("8 cm")
-        form.addRow("Antenna Radius:", self.radius_combo)
-
+        geom_form.addRow("Antenna radius", self.radius_combo)
         self.speed_combo = QComboBox()
         self.speed_combo.addItems(["3.0e8 m/s (air)", "2.1e8 m/s", "1.8e8 m/s"])
         self.speed_combo.setCurrentText("3.0e8 m/s (air)")
-        form.addRow("Wave Speed:", self.speed_combo)
-
+        geom_form.addRow("Wave speed", self.speed_combo)
         self.span_combo = QComboBox()
         self.span_combo.addItems(["10 cm x 10 cm", "12 cm x 12 cm", "16 cm x 16 cm"])
         self.span_combo.setCurrentText("10 cm x 10 cm")
-        form.addRow("Field of View:", self.span_combo)
-
+        geom_form.addRow("Field of view", self.span_combo)
         self.angle_offset_combo = QComboBox()
         self.angle_offset_combo.addItems(["0°", "90°", "180°", "270°"])
         self.angle_offset_combo.setCurrentText("0°")
-        form.addRow("Antenna Angle Offset:", self.angle_offset_combo)
-
+        geom_form.addRow("Angle offset", self.angle_offset_combo)
         self.rotation_combo = QComboBox()
         self.rotation_combo.addItems(["CCW", "CW"])
-        form.addRow("Antenna Rotation:", self.rotation_combo)
-
+        geom_form.addRow("Rotation", self.rotation_combo)
         self.flip_combo = QComboBox()
         self.flip_combo.addItems(["None", "Flip X", "Flip Y", "Flip X+Y"])
-        form.addRow("Axis Flip:", self.flip_combo)
-
+        geom_form.addRow("Axis flip", self.flip_combo)
         self.arc_combo = QComboBox()
         self.arc_combo.addItems(["360°", "355° (BMID)"])
-        form.addRow("Antenna Arc:", self.arc_combo)
-
+        geom_form.addRow("Antenna arc", self.arc_combo)
         self.phase_delay_combo = QComboBox()
         self.phase_delay_combo.addItems(["Off", "On (BMID)"])
-        form.addRow("Phase-delay Radius:", self.phase_delay_combo)
+        geom_form.addRow("Phase-delay radius", self.phase_delay_combo)
+        geom.setLayout(geom_form)
+        settings_grid.addWidget(geom)
 
+        imaging = QGroupBox("Imaging")
+        imaging_form = QFormLayout()
+        imaging_form.setSpacing(10)
         self.roi_mode_combo = QComboBox()
-        self.roi_mode_combo.addItems(["Peak score", "Prefer off-center"])
-        self.roi_mode_combo.setCurrentText("Prefer off-center")
-        form.addRow("ROI Mode:", self.roi_mode_combo)
-
+        self.roi_mode_combo.addItems(["Peak score", "Prefer off-center", "Tight peak"])
+        self.roi_mode_combo.setCurrentText("Peak score")
+        imaging_form.addRow("ROI mode", self.roi_mode_combo)
         self.beamformer_mode_combo = QComboBox()
         self.beamformer_mode_combo.addItems(
             [
@@ -174,151 +242,110 @@ class ReconstructionPanel(QWidget):
             ]
         )
         self.beamformer_mode_combo.setCurrentText("Prefer DMAS-D4")
-        form.addRow("Beamformer Pick:", self.beamformer_mode_combo)
-
-        self.auto_quick_check = QCheckBox("Quick search (fewer geometry combos)")
+        imaging_form.addRow("Beamformer pick", self.beamformer_mode_combo)
+        self.auto_quick_check = QCheckBox("Quick Auto Tweak search")
         self.auto_quick_check.setChecked(True)
-        form.addRow("Auto Tweak:", self.auto_quick_check)
-
-        self.auto_wave_check = QCheckBox("Also sweep wave speed (3.0 / 2.1 / 1.8 e8)")
+        imaging_form.addRow("", self.auto_quick_check)
+        self.auto_wave_check = QCheckBox("Also sweep wave speed")
         self.auto_wave_check.setChecked(False)
-        form.addRow("", self.auto_wave_check)
-
-        config_group.setLayout(form)
-        layout.addWidget(config_group)
-
-        run_row = QHBoxLayout()
-        self.run_button = QPushButton("Run Reconstruction")
-        self.run_button.clicked.connect(self.on_run_clicked)
-        self.run_button.setEnabled(False)
-        run_row.addWidget(self.run_button)
-
-        self.auto_tweak_button = QPushButton("Auto Tweak Settings")
-        self.auto_tweak_button.setToolTip(
-            "Search angle / flip / arc / phase-delay / ROI / beamformer automatically, "
-            "apply the best settings to the manual controls, then reconstruct."
+        imaging_form.addRow("", self.auto_wave_check)
+        tip = QLabel(
+            "BMID tip: radius 18 cm, FOV 12×12 cm, c = 3.0e8, Peak ROI, Prefer DMAS-D4."
         )
-        self.auto_tweak_button.clicked.connect(self.on_auto_tweak_clicked)
-        self.auto_tweak_button.setEnabled(False)
-        run_row.addWidget(self.auto_tweak_button)
+        tip.setObjectName("hintLabel")
+        tip.setWordWrap(True)
+        imaging_form.addRow(tip)
+        imaging.setLayout(imaging_form)
+        settings_grid.addWidget(imaging)
+        settings_grid.addStretch(1)
 
-        self.export_report_button = QPushButton("Download Final Report")
-        self.export_report_button.setToolTip("Export Markdown + JSON session report for review")
-        self.export_report_button.setEnabled(False)
-        run_row.addWidget(self.export_report_button)
+        settings_scroll.setWidget(settings_host)
+        settings_outer.addWidget(settings_scroll)
+        self.content_tabs.addTab(settings_tab, "Settings")
 
-        self.status_label = QLabel("No dataset loaded.")
-        run_row.addWidget(self.status_label, stretch=1)
-        layout.addLayout(run_row)
+        # --- Details ---
+        details_tab = QWidget()
+        details_layout = QVBoxLayout(details_tab)
+        details_layout.setContentsMargins(8, 16, 8, 8)
+        details_layout.setSpacing(12)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
 
-        self.auto_progress = QProgressBar()
-        self.auto_progress.setValue(0)
-        self.auto_progress.setVisible(False)
-        layout.addWidget(self.auto_progress)
-
-        self.content_tabs = QTabWidget()
-        layout.addWidget(self.content_tabs, stretch=1)
-
-        overview_tab = QWidget()
-        overview_layout = QVBoxLayout(overview_tab)
-
-        selected_group = QGroupBox("Selected Reconstruction")
-        selected_layout = QVBoxLayout()
-        self.selected_figure = Figure(figsize=(7, 6))
-        self.selected_canvas = FigureCanvasQTAgg(self.selected_figure)
-        selected_layout.addWidget(self.selected_canvas)
-        selected_group.setLayout(selected_layout)
-        overview_layout.addWidget(selected_group, stretch=3)
-
-        overview_bottom = QHBoxLayout()
-
-        summary_group = QGroupBox("Selected Reconstruction Summary")
-        summary_layout = QVBoxLayout()
+        summary_col = QVBoxLayout()
+        summary_col.addWidget(QLabel("Summary"))
         self.summary_table = QTableWidget(0, 2)
         self.summary_table.setHorizontalHeaderLabels(["Metric", "Value"])
         self.summary_table.horizontalHeader().setStretchLastSection(True)
         self.summary_table.verticalHeader().setVisible(False)
         self.summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        summary_layout.addWidget(self.summary_table)
-        summary_group.setLayout(summary_layout)
-        overview_bottom.addWidget(summary_group, stretch=1)
+        summary_col.addWidget(self.summary_table)
+        top_row.addLayout(summary_col, stretch=1)
 
-        roi_group = QGroupBox("ROI Localization")
-        roi_layout = QVBoxLayout()
+        roi_col = QVBoxLayout()
+        roi_col.addWidget(QLabel("ROI"))
         self.roi_table = QTableWidget(0, 2)
         self.roi_table.setHorizontalHeaderLabels(["Metric", "Value"])
         self.roi_table.horizontalHeader().setStretchLastSection(True)
         self.roi_table.verticalHeader().setVisible(False)
         self.roi_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        roi_layout.addWidget(self.roi_table)
-        roi_group.setLayout(roi_layout)
-        overview_bottom.addWidget(roi_group, stretch=1)
+        roi_col.addWidget(self.roi_table)
+        top_row.addLayout(roi_col, stretch=1)
+        details_layout.addLayout(top_row, stretch=2)
 
-        log_group = QGroupBox("Status Log")
-        log_layout = QVBoxLayout()
-        self.log_view = QLabel()
-        self.log_view.setWordWrap(True)
-        log_layout.addWidget(self.log_view)
-        log_group.setLayout(log_layout)
-        overview_bottom.addWidget(log_group, stretch=1)
-
-        overview_layout.addLayout(overview_bottom, stretch=1)
-
-        assumptions_group = QGroupBox("Reconstruction Assumptions")
-        assumptions_layout = QVBoxLayout()
-        self.assumptions_label = QLabel("No reconstruction assumptions available yet.")
+        self.assumptions_label = QLabel("No reconstruction assumptions yet.")
+        self.assumptions_label.setObjectName("hintLabel")
         self.assumptions_label.setWordWrap(True)
-        assumptions_layout.addWidget(self.assumptions_label)
-        assumptions_group.setLayout(assumptions_layout)
-        overview_layout.addWidget(assumptions_group)
-        self.content_tabs.addTab(overview_tab, "Overview")
+        details_layout.addWidget(self.assumptions_label)
 
+        self.log_view = QLabel()
+        self.log_view.setObjectName("hintLabel")
+        self.log_view.setWordWrap(True)
+        details_layout.addWidget(self.log_view)
+        details_layout.addStretch(1)
+        self.content_tabs.addTab(details_tab, "Details")
+
+        # --- Comparison ---
         comparison_tab = QWidget()
         comparison_layout = QVBoxLayout(comparison_tab)
-
-        plots_group = QGroupBox("Beamformer Comparison")
-        plots_layout = QVBoxLayout()
-        self.figure = Figure(figsize=(8, 7))
+        comparison_layout.setContentsMargins(4, 12, 4, 4)
+        self.figure = Figure(figsize=(8, 5.5), tight_layout=True)
         self.canvas = FigureCanvasQTAgg(self.figure)
-        plots_layout.addWidget(self.canvas)
-        plots_group.setLayout(plots_layout)
-        comparison_layout.addWidget(plots_group, stretch=3)
-
-        metrics_group = QGroupBox("Beamformer Quality Metrics")
-        metrics_layout = QVBoxLayout()
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        comparison_layout.addWidget(self.canvas, stretch=3)
         self.metrics_table = QTableWidget(0, 6)
-        self.metrics_table.setHorizontalHeaderLabels(["Algorithm", "SNR", "SCR", "Contrast", "Time (s)", "Score"])
+        self.metrics_table.setHorizontalHeaderLabels(
+            ["Algorithm", "SNR", "SCR", "Contrast", "Time (s)", "Score"]
+        )
         self.metrics_table.horizontalHeader().setStretchLastSection(True)
         self.metrics_table.verticalHeader().setVisible(False)
         self.metrics_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        metrics_layout.addWidget(self.metrics_table)
-        metrics_group.setLayout(metrics_layout)
-        comparison_layout.addWidget(metrics_group, stretch=1)
-        self.content_tabs.addTab(comparison_tab, "Beamformer Comparison")
+        self.metrics_table.setMaximumHeight(160)
+        comparison_layout.addWidget(self.metrics_table, stretch=1)
+        self.content_tabs.addTab(comparison_tab, "Compare")
 
+        # --- ROI refine ---
         refinement_tab = QWidget()
         refinement_layout_root = QHBoxLayout(refinement_tab)
-
-        refinement_plot_group = QGroupBox("High-Resolution ROI Reconstruction")
-        refinement_plot_layout = QVBoxLayout()
-        self.refined_figure = Figure(figsize=(10, 7.0))
+        refinement_layout_root.setContentsMargins(4, 12, 4, 4)
+        refinement_layout_root.setSpacing(16)
+        self.refined_figure = Figure(figsize=(8, 5.5), tight_layout=True)
         self.refined_canvas = FigureCanvasQTAgg(self.refined_figure)
-        self.refined_canvas.setMinimumHeight(500)
-        refinement_plot_layout.addWidget(self.refined_canvas)
-        refinement_plot_group.setLayout(refinement_plot_layout)
-        refinement_layout_root.addWidget(refinement_plot_group, stretch=4)
-
-        refinement_info_group = QGroupBox("Refined ROI Details")
-        refinement_info_layout = QVBoxLayout()
+        self.refined_canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        refinement_layout_root.addWidget(self.refined_canvas, stretch=3)
+        refine_side = QVBoxLayout()
+        refine_side.addWidget(QLabel("ROI details"))
         self.refinement_table = QTableWidget(0, 2)
         self.refinement_table.setHorizontalHeaderLabels(["Metric", "Value"])
         self.refinement_table.horizontalHeader().setStretchLastSection(True)
         self.refinement_table.verticalHeader().setVisible(False)
         self.refinement_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        refinement_info_layout.addWidget(self.refinement_table)
-        refinement_info_group.setLayout(refinement_info_layout)
-        refinement_layout_root.addWidget(refinement_info_group, stretch=1)
-        self.content_tabs.addTab(refinement_tab, "ROI Refinement")
+        refine_side.addWidget(self.refinement_table)
+        refinement_layout_root.addLayout(refine_side, stretch=1)
+        self.content_tabs.addTab(refinement_tab, "ROI refine")
+
+        self.content_tabs.setCurrentIndex(0)
 
     def _log(self, message: str, level: str = "INFO") -> None:
         line = self.status_log.add(message, level)
@@ -369,6 +396,7 @@ class ReconstructionPanel(QWidget):
         quick = self.auto_quick_check.isChecked()
         include_waves = self.auto_wave_check.isChecked()
         prefer_off = self.roi_mode_combo.currentText() == "Prefer off-center"
+        tight_peak = self.roi_mode_combo.currentText() == "Tight peak"
 
         self.run_button.setEnabled(False)
         self.auto_tweak_button.setEnabled(False)
@@ -386,6 +414,7 @@ class ReconstructionPanel(QWidget):
             quick=quick,
             include_wave_speeds=include_waves,
             baseline_prefer_off_center=prefer_off,
+            baseline_tight_peak=tight_peak,
             parent=self,
         )
         self.auto_worker.progress_updated.connect(self._on_auto_progress)
@@ -420,8 +449,13 @@ class ReconstructionPanel(QWidget):
             else f"score={best.score:.4f}"
         )
         baseline_txt = ""
-        if result.baseline is not None and result.baseline.tumor_gt_distance_m is not None:
-            baseline_txt = f" (baseline {result.baseline.tumor_gt_distance_m * 100:.2f} cm)"
+        if (
+            result.baseline is not None
+            and result.baseline.tumor_gt_distance_m is not None
+        ):
+            baseline_txt = (
+                f" (baseline {result.baseline.tumor_gt_distance_m * 100:.2f} cm)"
+            )
 
         self.run_button.setEnabled(True)
         self.auto_tweak_button.setEnabled(True)
@@ -457,20 +491,32 @@ class ReconstructionPanel(QWidget):
     def _apply_auto_result_to_controls(self, result: AutoCalibrateResult) -> None:
         g = result.best.geometry
         self.speed_combo.setCurrentText(self._speed_text(g.wave_speed))
-        self.angle_offset_combo.setCurrentText(self._angle_offset_text(g.antenna_angle_offset_deg))
+        self.angle_offset_combo.setCurrentText(
+            self._angle_offset_text(g.antenna_angle_offset_deg)
+        )
         self.rotation_combo.setCurrentText("CW" if g.antenna_clockwise else "CCW")
-        self.flip_combo.setCurrentText(self._flip_text(g.antenna_flip_x, g.antenna_flip_y))
-        self.arc_combo.setCurrentText("355° (BMID)" if abs(g.antenna_span_deg - 355.0) < 1e-3 else "360°")
-        self.phase_delay_combo.setCurrentText("On (BMID)" if g.use_bmid_phase_delay_radius else "Off")
+        self.flip_combo.setCurrentText(
+            self._flip_text(g.antenna_flip_x, g.antenna_flip_y)
+        )
+        self.arc_combo.setCurrentText(
+            "355° (BMID)" if abs(g.antenna_span_deg - 355.0) < 1e-3 else "360°"
+        )
+        self.phase_delay_combo.setCurrentText(
+            "On (BMID)" if g.use_bmid_phase_delay_radius else "Off"
+        )
         self.roi_mode_combo.setCurrentText(
-            "Prefer off-center" if g.prefer_off_center_roi else "Peak score"
+            "Tight peak"
+            if g.tight_peak_roi
+            else ("Prefer off-center" if g.prefer_off_center_roi else "Peak score")
         )
         force_map = {
             "DAS": "Force DAS",
             "DMAS": "Force DMAS",
             "DMAS-D4": "Force DMAS-D4",
         }
-        self.beamformer_mode_combo.setCurrentText(force_map.get(result.best.beamformer, "Prefer DMAS-D4"))
+        self.beamformer_mode_combo.setCurrentText(
+            force_map.get(result.best.beamformer, "Prefer DMAS-D4")
+        )
 
     def _run_reconstruction(self, dataset: MicrowaveDataset) -> None:
         self._log("Starting reconstruction...")
@@ -480,6 +526,7 @@ class ReconstructionPanel(QWidget):
         config = self._current_reconstruction_config(dataset)
         tumor_xy = self._tumor_xy_m(dataset)
         prefer_off_center = self.roi_mode_combo.currentText() == "Prefer off-center"
+        tight_peak = self.roi_mode_combo.currentText() == "Tight peak"
         beamformer_mode = self._selected_beamformer_mode()
 
         images, timings = reconstruct_all(
@@ -496,10 +543,12 @@ class ReconstructionPanel(QWidget):
             y_span=config.y_span,
             tumor_xy_m=tumor_xy,
             prefer_off_center=prefer_off_center,
+            tight_peak=tight_peak,
         )
         roi_result = detect_roi(
             images[selected_name],
             prefer_off_center=prefer_off_center,
+            tight_peak=tight_peak,
             x_span=config.x_span,
             y_span=config.y_span,
         )
@@ -567,9 +616,11 @@ class ReconstructionPanel(QWidget):
         self._populate_refinement(refinement)
         gt_note = ""
         if tumor_xy is not None:
-            gt_note = f" Tumor GT=({tumor_xy[0]*100:.2f}, {tumor_xy[1]*100:.2f}) cm."
+            gt_note = (
+                f" Tumor GT=({tumor_xy[0] * 100:.2f}, {tumor_xy[1] * 100:.2f}) cm."
+            )
             if gt_distance is not None:
-                gt_note += f" ROI distance={gt_distance*100:.2f} cm."
+                gt_note += f" ROI distance={gt_distance * 100:.2f} cm."
         geom_note = (
             f" offset={config.antenna_angle_offset_deg:.0f}°, "
             f"arc={config.antenna_span_deg:.0f}°, "
@@ -581,6 +632,7 @@ class ReconstructionPanel(QWidget):
             f" ROI bbox={roi_result.bounding_box}. Refined grid={refinement.grid_shape[1]}x{refinement.grid_shape[0]}.{gt_note}",
             "SUCCESS",
         )
+        self.content_tabs.setCurrentIndex(0)
         self.reconstruction_completed.emit(self.last_snapshot)
 
     def _tumor_xy_m(self, dataset: MicrowaveDataset) -> tuple[float, float] | None:
@@ -612,11 +664,19 @@ class ReconstructionPanel(QWidget):
         self.radius_combo.setCurrentText(self._radius_text(config.antenna_radius))
         self.speed_combo.setCurrentText(self._speed_text(config.wave_speed))
         self.span_combo.setCurrentText(self._span_text(config.x_span, config.y_span))
-        self.angle_offset_combo.setCurrentText(self._angle_offset_text(config.antenna_angle_offset_deg))
+        self.angle_offset_combo.setCurrentText(
+            self._angle_offset_text(config.antenna_angle_offset_deg)
+        )
         self.rotation_combo.setCurrentText("CW" if config.antenna_clockwise else "CCW")
-        self.flip_combo.setCurrentText(self._flip_text(config.antenna_flip_x, config.antenna_flip_y))
-        self.arc_combo.setCurrentText("355° (BMID)" if abs(config.antenna_span_deg - 355.0) < 1e-3 else "360°")
-        self.phase_delay_combo.setCurrentText("On (BMID)" if config.use_bmid_phase_delay_radius else "Off")
+        self.flip_combo.setCurrentText(
+            self._flip_text(config.antenna_flip_x, config.antenna_flip_y)
+        )
+        self.arc_combo.setCurrentText(
+            "355° (BMID)" if abs(config.antenna_span_deg - 355.0) < 1e-3 else "360°"
+        )
+        self.phase_delay_combo.setCurrentText(
+            "On (BMID)" if config.use_bmid_phase_delay_radius else "Off"
+        )
         meta = dataset.metadata or {}
         if str(meta.get("dataset_family", "")).upper() == "UM-BMID":
             self.roi_mode_combo.setCurrentText("Peak score")
@@ -640,8 +700,12 @@ class ReconstructionPanel(QWidget):
         config.antenna_angle_offset_deg = self._selected_angle_offset_deg()
         config.antenna_clockwise = self.rotation_combo.currentText() == "CW"
         config.antenna_flip_x, config.antenna_flip_y = self._selected_flips()
-        config.antenna_span_deg = 355.0 if "355" in self.arc_combo.currentText() else 360.0
-        config.use_bmid_phase_delay_radius = self.phase_delay_combo.currentText().startswith("On")
+        config.antenna_span_deg = (
+            355.0 if "355" in self.arc_combo.currentText() else 360.0
+        )
+        config.use_bmid_phase_delay_radius = (
+            self.phase_delay_combo.currentText().startswith("On")
+        )
         return config
 
     def _selected_beamformer_mode(self) -> str:
@@ -687,7 +751,9 @@ class ReconstructionPanel(QWidget):
             return "Flip Y"
         return "None"
 
-    def _update_assumption_summary(self, source_notes: dict[str, str], warnings: list[str]) -> None:
+    def _update_assumption_summary(
+        self, source_notes: dict[str, str], warnings: list[str]
+    ) -> None:
         lines = [f"{key}: {value}" for key, value in source_notes.items()]
         if warnings:
             lines.append("Warnings:")
@@ -741,8 +807,15 @@ class ReconstructionPanel(QWidget):
             return "1.8e8 m/s"
         return "3.0e8 m/s (air)"
 
-    def _span_text(self, x_span: tuple[float, float], y_span: tuple[float, float]) -> str:
-        half_span = max(abs(float(x_span[0])), abs(float(x_span[1])), abs(float(y_span[0])), abs(float(y_span[1])))
+    def _span_text(
+        self, x_span: tuple[float, float], y_span: tuple[float, float]
+    ) -> str:
+        half_span = max(
+            abs(float(x_span[0])),
+            abs(float(x_span[1])),
+            abs(float(y_span[0])),
+            abs(float(y_span[1])),
+        )
         mapping = {
             0.05: "10 cm x 10 cm",
             0.06: "12 cm x 12 cm",
@@ -768,7 +841,12 @@ class ReconstructionPanel(QWidget):
             vmax = float(np.max(image) + 1e-12)
         extent = None
         if x_span is not None and y_span is not None:
-            extent = [x_span[0] * 100.0, x_span[1] * 100.0, y_span[0] * 100.0, y_span[1] * 100.0]
+            extent = [
+                x_span[0] * 100.0,
+                x_span[1] * 100.0,
+                y_span[0] * 100.0,
+                y_span[1] * 100.0,
+            ]
         im = ax.imshow(
             image,
             cmap="inferno",
@@ -799,7 +877,13 @@ class ReconstructionPanel(QWidget):
     ) -> None:
         self.selected_figure.clear()
         ax = self.selected_figure.add_subplot(1, 1, 1)
-        im = self._configure_image_axes(ax, image, f"Selected Reconstruction: {selected_name}", x_span=x_span, y_span=y_span)
+        im = self._configure_image_axes(
+            ax,
+            image,
+            f"Selected Reconstruction: {selected_name}",
+            x_span=x_span,
+            y_span=y_span,
+        )
         x0, y0, x1, y1 = roi_result.bounding_box
         x_axis = np.linspace(x_span[0] * 100.0, x_span[1] * 100.0, image.shape[1])
         y_axis = np.linspace(y_span[0] * 100.0, y_span[1] * 100.0, image.shape[0])
@@ -812,8 +896,12 @@ class ReconstructionPanel(QWidget):
             facecolor="none",
         )
         ax.add_patch(rect)
-        centroid_x = np.interp(roi_result.centroid[0], np.arange(image.shape[1]), x_axis)
-        centroid_y = np.interp(roi_result.centroid[1], np.arange(image.shape[0]), y_axis)
+        centroid_x = np.interp(
+            roi_result.centroid[0], np.arange(image.shape[1]), x_axis
+        )
+        centroid_y = np.interp(
+            roi_result.centroid[1], np.arange(image.shape[0]), y_axis
+        )
         ax.plot(centroid_x, centroid_y, "wo", markersize=5, label="ROI centroid")
         if tumor_xy_m is not None:
             ax.plot(
@@ -842,12 +930,18 @@ class ReconstructionPanel(QWidget):
         self.figure.clear()
         titles = ["DAS", "DMAS", "DMAS-D4", f"Selected: {selected_name}"]
         keys = ["DAS", "DMAS", "DMAS-D4", selected_name]
-        x_axis = np.linspace(x_span[0] * 100.0, x_span[1] * 100.0, images[selected_name].shape[1])
-        y_axis = np.linspace(y_span[0] * 100.0, y_span[1] * 100.0, images[selected_name].shape[0])
+        x_axis = np.linspace(
+            x_span[0] * 100.0, x_span[1] * 100.0, images[selected_name].shape[1]
+        )
+        y_axis = np.linspace(
+            y_span[0] * 100.0, y_span[1] * 100.0, images[selected_name].shape[0]
+        )
 
         for idx, key in enumerate(keys, start=1):
             ax = self.figure.add_subplot(2, 2, idx)
-            self._configure_image_axes(ax, images[key], titles[idx - 1], x_span=x_span, y_span=y_span)
+            self._configure_image_axes(
+                ax, images[key], titles[idx - 1], x_span=x_span, y_span=y_span
+            )
             x0, y0, x1, y1 = roi_result.bounding_box
             rect = Rectangle(
                 (x_axis[max(0, x0)], y_axis[max(0, y0)]),
@@ -885,12 +979,17 @@ class ReconstructionPanel(QWidget):
         self.refined_figure.tight_layout()
         self.refined_canvas.draw()
 
-    def _populate_summary(self, images: dict[str, np.ndarray], selected_name: str) -> None:
+    def _populate_summary(
+        self, images: dict[str, np.ndarray], selected_name: str
+    ) -> None:
         selected = images[selected_name]
         mean_val = float(np.mean(selected))
         std_val = float(np.std(selected))
         peak_val = float(np.max(selected))
-        contrast = float((np.max(selected) - np.min(selected)) / (np.max(selected) + np.min(selected) + 1e-12))
+        contrast = float(
+            (np.max(selected) - np.min(selected))
+            / (np.max(selected) + np.min(selected) + 1e-12)
+        )
 
         info = {
             "Selected Beamformer": selected_name,
@@ -910,11 +1009,21 @@ class ReconstructionPanel(QWidget):
         self.metrics_table.setRowCount(len(quality_metrics))
         for row, (name, metrics) in enumerate(quality_metrics.items()):
             self.metrics_table.setItem(row, 0, QTableWidgetItem(name))
-            self.metrics_table.setItem(row, 1, QTableWidgetItem(f"{metrics['snr']:.4f}"))
-            self.metrics_table.setItem(row, 2, QTableWidgetItem(f"{metrics['scr']:.4f}"))
-            self.metrics_table.setItem(row, 3, QTableWidgetItem(f"{metrics['contrast']:.4f}"))
-            self.metrics_table.setItem(row, 4, QTableWidgetItem(f"{metrics['time']:.4f}"))
-            self.metrics_table.setItem(row, 5, QTableWidgetItem(f"{metrics['score']:.4f}"))
+            self.metrics_table.setItem(
+                row, 1, QTableWidgetItem(f"{metrics['snr']:.4f}")
+            )
+            self.metrics_table.setItem(
+                row, 2, QTableWidgetItem(f"{metrics['scr']:.4f}")
+            )
+            self.metrics_table.setItem(
+                row, 3, QTableWidgetItem(f"{metrics['contrast']:.4f}")
+            )
+            self.metrics_table.setItem(
+                row, 4, QTableWidgetItem(f"{metrics['time']:.4f}")
+            )
+            self.metrics_table.setItem(
+                row, 5, QTableWidgetItem(f"{metrics['score']:.4f}")
+            )
         self.metrics_table.resizeColumnsToContents()
 
     def _populate_roi(self, roi_result: ROIResult) -> None:

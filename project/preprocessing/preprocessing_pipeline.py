@@ -33,7 +33,10 @@ from typing import Callable, Optional
 import numpy as np
 
 from data_loader.dataset_info import MicrowaveDataset
-from preprocessing.artifact_suppression import apply_artifact_suppression, background_subtraction
+from preprocessing.artifact_suppression import (
+    apply_artifact_suppression,
+    background_subtraction,
+)
 from preprocessing.calibration import apply_calibration
 from preprocessing.filtering import apply_noise_filter
 from preprocessing.normalization import apply_normalization
@@ -41,6 +44,10 @@ from preprocessing.touchstone_s21 import (
     TouchstoneS21ProcessingResult,
     TouchstoneS21ValidationReport,
     process_touchstone_s21_dataset,
+)
+from preprocessing.week3_time_domain import (
+    Week3TimeDomainResult,
+    process_week3_time_domain,
 )
 from utils.exceptions import MicrowaveFrameworkError
 from utils.logger import get_logger
@@ -86,6 +93,11 @@ class PreprocessingConfig:
     spike_detection_method: str = "hampel"
     spike_detection_kwargs: dict = field(default_factory=dict)
     generate_normalized_copy: bool = True
+
+    # Module 2 Week 3 (Signal Preprocessing_21082026.pdf steps 10–16)
+    enable_week3: bool = True
+    enable_group_clutter_removal: bool = True
+    enable_global_normalize: bool = True
 
 
 @dataclass
@@ -136,6 +148,7 @@ class PreprocessingResult:
     config: PreprocessingConfig
     validation_report: Optional[TouchstoneS21ValidationReport] = None
     touchstone_s21_result: Optional[TouchstoneS21ProcessingResult] = None
+    week3_result: Optional[Week3TimeDomainResult] = None
 
 
 def estimate_snr_db(s_params: np.ndarray) -> float:
@@ -152,16 +165,18 @@ def estimate_snr_db(s_params: np.ndarray) -> float:
     """
     magnitude = np.abs(s_params).reshape(s_params.shape[0], -1)
     if magnitude.shape[0] < 5:
-        signal_power = np.mean(magnitude ** 2)
+        signal_power = np.mean(magnitude**2)
         return 10 * np.log10(signal_power + 1e-30)
 
     # Smooth version approximates the "signal"; residual approximates "noise"
     kernel = np.ones(5) / 5
-    smoothed = np.apply_along_axis(lambda x: np.convolve(x, kernel, mode="same"), 0, magnitude)
+    smoothed = np.apply_along_axis(
+        lambda x: np.convolve(x, kernel, mode="same"), 0, magnitude
+    )
     noise = magnitude - smoothed
 
-    signal_power = np.mean(smoothed ** 2)
-    noise_power = np.mean(noise ** 2) + 1e-30
+    signal_power = np.mean(smoothed**2)
+    noise_power = np.mean(noise**2) + 1e-30
     return float(10 * np.log10(signal_power / noise_power))
 
 
@@ -196,7 +211,9 @@ def _report_progress(callback: ProgressCallback, percent: int, message: str) -> 
 
 
 def _is_touchstone_s2p_dataset(dataset: MicrowaveDataset) -> bool:
-    return dataset.file_type.startswith("Touchstone") and dataset.file_path.lower().endswith(".s2p")
+    return dataset.file_type.startswith(
+        "Touchstone"
+    ) and dataset.file_path.lower().endswith(".s2p")
 
 
 def run_preprocessing_pipeline(
@@ -226,7 +243,9 @@ def run_preprocessing_pipeline(
     config = config or PreprocessingConfig()
 
     if _is_touchstone_s2p_dataset(dataset):
-        _report_progress(progress_callback, 5, "Parsing Touchstone S21 header and trace")
+        _report_progress(
+            progress_callback, 5, "Parsing Touchstone S21 header and trace"
+        )
         touchstone_result = process_touchstone_s21_dataset(dataset, config)
 
         stage_outputs: dict = {
@@ -238,12 +257,30 @@ def run_preprocessing_pipeline(
         if touchstone_result.averaged_s21 is not None:
             stage_outputs["Averaged"] = touchstone_result.averaged_s21.reshape(-1, 1)
         if touchstone_result.reference_subtracted_s21 is not None:
-            stage_outputs["Reference Subtracted"] = touchstone_result.reference_subtracted_s21.reshape(-1, 1)
+            stage_outputs["Reference Subtracted"] = (
+                touchstone_result.reference_subtracted_s21.reshape(-1, 1)
+            )
         if touchstone_result.normalized_s21 is not None:
-            stage_outputs["Normalized"] = touchstone_result.normalized_s21.reshape(-1, 1)
+            stage_outputs["Normalized"] = touchstone_result.normalized_s21.reshape(
+                -1, 1
+            )
+
+        week3_result = touchstone_result.week3_result
+        if week3_result is not None:
+            stage_outputs["Time Hamming"] = week3_result.time_hamming
+            if week3_result.time_reference_subtracted is not None:
+                stage_outputs["Time Ref Subtracted"] = (
+                    week3_result.time_reference_subtracted
+                )
+            if week3_result.time_clutter_removed is not None:
+                stage_outputs["Time Clutter Removed"] = (
+                    week3_result.time_clutter_removed
+                )
 
         raw_stats = compute_signal_statistics(touchstone_result.raw_s21.reshape(-1, 1))
-        filtered_stats = compute_signal_statistics(touchstone_result.filtered_s21.reshape(-1, 1))
+        filtered_stats = compute_signal_statistics(
+            touchstone_result.filtered_s21.reshape(-1, 1)
+        )
         raw_energy = np.mean(np.abs(touchstone_result.raw_s21) ** 2)
         filtered_energy = np.mean(np.abs(touchstone_result.filtered_s21) ** 2)
         artifact_reduction_ratio = float(
@@ -279,6 +316,16 @@ def run_preprocessing_pipeline(
             "normalized_s21": touchstone_result.normalized_s21,
             "delta_f_hz": touchstone_result.delta_f_hz,
         }
+        if week3_result is not None:
+            processed_dataset.metadata["module2_week3"] = {
+                "time_s": week3_result.time_s,
+                "delta_t_s": week3_result.delta_t_s,
+                "time_hamming": week3_result.time_hamming,
+                "time_reference_subtracted": week3_result.time_reference_subtracted,
+                "time_clutter_removed": week3_result.time_clutter_removed,
+                "time_global_normalized": week3_result.time_global_normalized,
+                "global_scale_alpha": week3_result.global_scale_alpha,
+            }
 
         _report_progress(progress_callback, 100, "Preprocessing complete")
         logger.info("Touchstone S21 preprocessing completed successfully.")
@@ -290,6 +337,7 @@ def run_preprocessing_pipeline(
             config=config,
             validation_report=touchstone_result.report,
             touchstone_s21_result=touchstone_result,
+            week3_result=week3_result,
         )
 
     stage_outputs: dict = {}
@@ -300,11 +348,41 @@ def run_preprocessing_pipeline(
     current = original_s_params.copy()
 
     stages = [
-        ("Noise Filtering", lambda x: apply_noise_filter(x, method=config.filter_method, **config.filter_kwargs)),
-        ("Calibration", lambda x: apply_calibration(x, method=config.calibration_method, reference=config.calibration_reference)),
-        ("Normalization", lambda x: apply_normalization(x, method=config.normalization_method)),
-        ("Background Subtraction", lambda x: background_subtraction(x, background=config.background_reference) if config.do_background_subtraction else x),
-        ("Artifact Suppression", lambda x: apply_artifact_suppression(x, method=config.artifact_method, background=None, **config.artifact_kwargs)),
+        (
+            "Noise Filtering",
+            lambda x: apply_noise_filter(
+                x, method=config.filter_method, **config.filter_kwargs
+            ),
+        ),
+        (
+            "Calibration",
+            lambda x: apply_calibration(
+                x,
+                method=config.calibration_method,
+                reference=config.calibration_reference,
+            ),
+        ),
+        (
+            "Normalization",
+            lambda x: apply_normalization(x, method=config.normalization_method),
+        ),
+        (
+            "Background Subtraction",
+            lambda x: (
+                background_subtraction(x, background=config.background_reference)
+                if config.do_background_subtraction
+                else x
+            ),
+        ),
+        (
+            "Artifact Suppression",
+            lambda x: apply_artifact_suppression(
+                x,
+                method=config.artifact_method,
+                background=None,
+                **config.artifact_kwargs,
+            ),
+        ),
     ]
 
     for stage_name, stage_fn in stages:
@@ -319,7 +397,9 @@ def run_preprocessing_pipeline(
             raise MicrowaveFrameworkError(f"[{stage_name}] {exc}") from exc
 
         percent_done += _STAGE_WEIGHTS.get(stage_name, 0)
-        _report_progress(progress_callback, min(percent_done, 95), f"Completed: {stage_name}")
+        _report_progress(
+            progress_callback, min(percent_done, 95), f"Completed: {stage_name}"
+        )
 
     _report_progress(progress_callback, 97, "Evaluating signal quality")
     stats_before = compute_signal_statistics(original_s_params)
@@ -348,6 +428,35 @@ def run_preprocessing_pipeline(
     processed_dataset.metadata = dict(dataset.metadata)
     processed_dataset.metadata["preprocessing_stages"] = list(stage_outputs.keys())
 
+    week3_result: Week3TimeDomainResult | None = None
+    if config.enable_week3 and current.ndim == 2 and current.shape[0] >= 2:
+        try:
+            week3_result = process_week3_time_domain(
+                dataset.frequencies,
+                current,
+                reference_filtered=None,
+                enable_clutter_removal=config.enable_group_clutter_removal,
+                enable_global_normalize=config.enable_global_normalize,
+            )
+            stage_outputs["Time Hamming"] = week3_result.time_hamming
+            if week3_result.time_clutter_removed is not None:
+                stage_outputs["Time Clutter Removed"] = (
+                    week3_result.time_clutter_removed
+                )
+            processed_dataset.metadata["module2_week3"] = {
+                "time_s": week3_result.time_s,
+                "delta_t_s": week3_result.delta_t_s,
+                "time_hamming": week3_result.time_hamming,
+                "time_clutter_removed": week3_result.time_clutter_removed,
+                "time_global_normalized": week3_result.time_global_normalized,
+                "global_scale_alpha": week3_result.global_scale_alpha,
+            }
+            processed_dataset.metadata["preprocessing_stages"] = list(
+                stage_outputs.keys()
+            )
+        except Exception as exc:
+            logger.warning("Week 3 time-domain stage skipped: %s", exc)
+
     _report_progress(progress_callback, 100, "Preprocessing complete")
     logger.info("Preprocessing pipeline completed successfully.")
 
@@ -359,4 +468,5 @@ def run_preprocessing_pipeline(
         config=config,
         validation_report=None,
         touchstone_s21_result=None,
+        week3_result=week3_result,
     )

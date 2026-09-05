@@ -22,6 +22,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
+from gui.styles import apply_app_style
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -30,6 +31,7 @@ logger = get_logger(__name__)
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Microwave Imaging Framework")
+    apply_app_style(app)
 
     window = MainWindow()
     window.show()

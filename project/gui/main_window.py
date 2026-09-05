@@ -43,9 +43,11 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QTabWidget,
+    QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -53,8 +55,10 @@ from PySide6.QtWidgets import (
 
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.loader import load_dataset
-from gui.upload_page import UploadPage
 from gui.reconstruction_page import ReconstructionPanel
+from gui.styles import set_mode_banner, set_page_title, set_primary_button
+from gui.upload_page import UploadPage
+from preprocessing.handover_export import export_module3_handover
 from preprocessing.preprocessing_pipeline import (
     PreprocessingConfig,
     PreprocessingResult,
@@ -122,111 +126,172 @@ class PreprocessingPanel(QWidget):
     # ------------------------------------------------------------------ #
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
 
-        title = QLabel("Module 2 — Signal Preprocessing")
-        title.setStyleSheet("font-size: 16px; font-weight: 600;")
-        layout.addWidget(title)
-
-        # --- Configuration controls ---
-        config_group = QGroupBox("Pipeline Configuration")
-        form = QFormLayout()
-
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["savgol", "gaussian", "median", "moving_average", "butterworth", "none"])
-        form.addRow("Noise Filtering:", self.filter_combo)
-
-        self.calibration_combo = QComboBox()
-        self.calibration_combo.addItems(["self", "none"])
-        form.addRow("Calibration:", self.calibration_combo)
-
-        self.normalization_combo = QComboBox()
-        self.normalization_combo.addItems(["max", "minmax", "zscore", "none"])
-        form.addRow("Normalization:", self.normalization_combo)
-
-        self.background_combo = QComboBox()
-        self.background_combo.addItems(["enabled", "disabled"])
-        form.addRow("Background Subtraction:", self.background_combo)
-
-        self.artifact_combo = QComboBox()
-        self.artifact_combo.addItems(["hybrid", "svd", "background", "none"])
-        form.addRow("Artifact Suppression:", self.artifact_combo)
-
-        auxiliary_row = QVBoxLayout()
-
-        repeated_row = QHBoxLayout()
-        self.repeated_button = QPushButton("Select Repeated .s2p Files")
-        self.repeated_button.clicked.connect(self._select_repeated_measurements)
-        repeated_row.addWidget(self.repeated_button)
-        self.repeated_label = QLabel("No repeated files selected.")
-        self.repeated_label.setWordWrap(True)
-        repeated_row.addWidget(self.repeated_label, stretch=1)
-        auxiliary_row.addLayout(repeated_row)
-
-        reference_row = QHBoxLayout()
-        self.reference_button = QPushButton("Select Reference .s2p File")
-        self.reference_button.clicked.connect(self._select_reference_dataset)
-        reference_row.addWidget(self.reference_button)
-        self.reference_label = QLabel("No reference file selected.")
-        self.reference_label.setWordWrap(True)
-        reference_row.addWidget(self.reference_label, stretch=1)
-        auxiliary_row.addLayout(reference_row)
-
-        self.touchstone_hint_label = QLabel(
-            "Repeated-measurement averaging and reference subtraction are available for Touchstone .s2p datasets only."
+        header = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title = QLabel()
+        set_page_title(title, "Preprocessing")
+        title_col.addWidget(title)
+        self.mode_banner = QLabel()
+        set_mode_banner(
+            self.mode_banner,
+            "info",
+            "Load a dataset in Module 1 to begin.",
         )
-        self.touchstone_hint_label.setWordWrap(True)
-        auxiliary_row.addWidget(self.touchstone_hint_label)
+        title_col.addWidget(self.mode_banner)
+        header.addLayout(title_col, stretch=1)
 
-        form.addRow("S21 Auxiliary Inputs:", auxiliary_row)
+        self.preset_bmid_button = QPushButton("BMID pass-through")
+        self.preset_bmid_button.setToolTip("All cleaning stages off — for already-clean BMID data.")
+        self.preset_bmid_button.clicked.connect(self._apply_bmid_passthrough_preset)
+        header.addWidget(self.preset_bmid_button)
 
-        config_group.setLayout(form)
-        layout.addWidget(config_group)
+        self.preset_s2p_button = QPushButton(".s2p defaults")
+        self.preset_s2p_button.setToolTip("Mild Savitzky–Golay + Week 3 for Touchstone S21.")
+        self.preset_s2p_button.clicked.connect(self._apply_s2p_brief_preset)
+        header.addWidget(self.preset_s2p_button)
 
-        # --- Run button + progress bar ---
-        run_row = QHBoxLayout()
-        self.run_button = QPushButton("Run Preprocessing")
+        self.run_button = QPushButton("Run")
+        set_primary_button(self.run_button)
         self.run_button.clicked.connect(self.on_run_clicked)
         self.run_button.setEnabled(False)
-        run_row.addWidget(self.run_button)
+        header.addWidget(self.run_button)
+
+        self.export_button = QPushButton("Export")
+        self.export_button.clicked.connect(self.on_export_handoff_clicked)
+        self.export_button.setEnabled(False)
+        header.addWidget(self.export_button)
+        layout.addLayout(header)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        run_row.addWidget(self.progress_bar, stretch=1)
-        layout.addLayout(run_row)
+        self.progress_bar.setTextVisible(False)
+        layout.addWidget(self.progress_bar)
 
-        # --- Plots ---
-        plots_group = QGroupBox("Signal Plots")
-        plots_layout = QVBoxLayout()
-        self.figure = Figure(figsize=(8, 6))
+        self.workspace_tabs = QTabWidget()
+        layout.addWidget(self.workspace_tabs, stretch=1)
+
+        # --- Plots (default) ---
+        plots_page = QWidget()
+        plots_layout = QVBoxLayout(plots_page)
+        plots_layout.setContentsMargins(4, 12, 4, 4)
+        self.figure = Figure(figsize=(8, 5.5), tight_layout=True)
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         plots_layout.addWidget(self.canvas)
-        plots_group.setLayout(plots_layout)
-        layout.addWidget(plots_group, stretch=2)
+        self.workspace_tabs.addTab(plots_page, "Plots")
 
-        # --- Summary + status log ---
-        bottom_row = QHBoxLayout()
+        # --- Settings ---
+        settings_page = QWidget()
+        settings_page.setAutoFillBackground(True)
+        settings_outer = QVBoxLayout(settings_page)
+        settings_outer.setContentsMargins(8, 16, 8, 8)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        settings_scroll.setAutoFillBackground(True)
+        settings_host = QWidget()
+        settings_host.setAutoFillBackground(True)
+        settings_host.setStyleSheet("background-color: #ffffff; color: #0f172a;")
+        settings_layout = QVBoxLayout(settings_host)
+        settings_layout.setSpacing(16)
 
-        summary_group = QGroupBox("Processing Summary")
-        summary_layout = QVBoxLayout()
+        basics = QGroupBox("Cleaning stages")
+        basics_form = QFormLayout()
+        basics_form.setSpacing(10)
+        basics_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(
+            ["none", "savgol", "gaussian", "median", "moving_average", "butterworth"]
+        )
+        basics_form.addRow("Noise filter", self.filter_combo)
+        self.calibration_combo = QComboBox()
+        self.calibration_combo.addItems(["none", "self"])
+        basics_form.addRow("Calibration", self.calibration_combo)
+        self.normalization_combo = QComboBox()
+        self.normalization_combo.addItems(["none", "max", "minmax", "zscore"])
+        basics_form.addRow("Normalization", self.normalization_combo)
+        self.background_combo = QComboBox()
+        self.background_combo.addItems(["disabled", "enabled"])
+        basics_form.addRow("Background subtract", self.background_combo)
+        self.artifact_combo = QComboBox()
+        self.artifact_combo.addItems(["none", "hybrid", "svd", "background"])
+        basics_form.addRow("Artifact suppression", self.artifact_combo)
+        basics.setLayout(basics_form)
+        settings_layout.addWidget(basics)
+
+        s21 = QGroupBox("Touchstone .s2p options")
+        s21_form = QFormLayout()
+        s21_form.setSpacing(10)
+        self.spike_combo = QComboBox()
+        self.spike_combo.addItems(["hampel", "median", "local"])
+        s21_form.addRow("Spike detection", self.spike_combo)
+        self.week3_combo = QComboBox()
+        self.week3_combo.addItems(["enabled", "disabled"])
+        s21_form.addRow("Week 3 time-domain", self.week3_combo)
+
+        aux = QVBoxLayout()
+        aux.setSpacing(8)
+        self.repeated_button = QPushButton("Select repeated .s2p files…")
+        self.repeated_button.clicked.connect(self._select_repeated_measurements)
+        aux.addWidget(self.repeated_button)
+        self.repeated_label = QLabel("None selected")
+        self.repeated_label.setObjectName("hintLabel")
+        self.repeated_label.setWordWrap(True)
+        aux.addWidget(self.repeated_label)
+        self.reference_button = QPushButton("Select reference .s2p…")
+        self.reference_button.clicked.connect(self._select_reference_dataset)
+        aux.addWidget(self.reference_button)
+        self.reference_label = QLabel("None selected")
+        self.reference_label.setObjectName("hintLabel")
+        self.reference_label.setWordWrap(True)
+        aux.addWidget(self.reference_label)
+        self.touchstone_hint_label = QLabel("These controls apply only to .s2p datasets.")
+        self.touchstone_hint_label.setObjectName("hintLabel")
+        self.touchstone_hint_label.setWordWrap(True)
+        aux.addWidget(self.touchstone_hint_label)
+        s21_form.addRow("Auxiliary files", aux)
+        s21.setLayout(s21_form)
+        settings_layout.addWidget(s21)
+        settings_layout.addStretch(1)
+
+        settings_scroll.setWidget(settings_host)
+        settings_outer.addWidget(settings_scroll)
+        self.workspace_tabs.addTab(settings_page, "Settings")
+
+        # --- Results ---
+        results_page = QWidget()
+        results_layout = QHBoxLayout(results_page)
+        results_layout.setContentsMargins(8, 16, 8, 8)
+        results_layout.setSpacing(16)
+
+        summary_col = QVBoxLayout()
+        summary_title = QLabel("Summary")
+        summary_title.setStyleSheet("font-weight: 600;")
+        summary_col.addWidget(summary_title)
         self.summary_table = QTableWidget(0, 2)
         self.summary_table.setHorizontalHeaderLabels(["Metric", "Value"])
         self.summary_table.horizontalHeader().setStretchLastSection(True)
         self.summary_table.verticalHeader().setVisible(False)
         self.summary_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        summary_layout.addWidget(self.summary_table)
-        summary_group.setLayout(summary_layout)
-        bottom_row.addWidget(summary_group, stretch=1)
+        self.summary_table.setAlternatingRowColors(True)
+        summary_col.addWidget(self.summary_table)
+        results_layout.addLayout(summary_col, stretch=1)
 
-        log_group = QGroupBox("Status Log")
-        log_layout = QVBoxLayout()
+        log_col = QVBoxLayout()
+        log_title = QLabel("Log")
+        log_title.setStyleSheet("font-weight: 600;")
+        log_col.addWidget(log_title)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
-        log_layout.addWidget(self.log_view)
-        log_group.setLayout(log_layout)
-        bottom_row.addWidget(log_group, stretch=1)
+        log_col.addWidget(self.log_view)
+        results_layout.addLayout(log_col, stretch=1)
 
-        layout.addLayout(bottom_row, stretch=1)
+        self.workspace_tabs.addTab(results_page, "Results")
+        self.workspace_tabs.setCurrentIndex(0)
 
     # ------------------------------------------------------------------ #
     def _log(self, message: str, level: str = "INFO") -> None:
@@ -248,10 +313,62 @@ class PreprocessingPanel(QWidget):
         self.run_button.setEnabled(True)
         self._reset_auxiliary_inputs()
         self._update_auxiliary_controls()
+        self._update_mode_banner_and_presets()
         self._log(f"Dataset '{dataset.file_name}' ready for preprocessing.")
 
+    def _is_bmid_dataset(self) -> bool:
+        if self.dataset is None:
+            return False
+        meta = self.dataset.metadata or {}
+        return meta.get("dataset_family") == "UM-BMID"
+
+    def _apply_bmid_passthrough_preset(self) -> None:
+        self.filter_combo.setCurrentText("none")
+        self.calibration_combo.setCurrentText("none")
+        self.normalization_combo.setCurrentText("none")
+        self.background_combo.setCurrentText("disabled")
+        self.artifact_combo.setCurrentText("none")
+        self.week3_combo.setCurrentText("disabled")
+        self._log("Applied BMID pass-through preset (all cleaning stages off).")
+
+    def _apply_s2p_brief_preset(self) -> None:
+        self.filter_combo.setCurrentText("savgol")
+        self.calibration_combo.setCurrentText("none")
+        self.normalization_combo.setCurrentText("none")
+        self.background_combo.setCurrentText("disabled")
+        self.artifact_combo.setCurrentText("none")
+        self.spike_combo.setCurrentText("hampel")
+        self.week3_combo.setCurrentText("enabled")
+        self._log("Applied .s2p brief defaults (mild Savitzky–Golay + Week 3).")
+
+    def _update_mode_banner_and_presets(self) -> None:
+        if self.dataset is None:
+            return
+        if self._is_touchstone_s2p_dataset():
+            set_mode_banner(
+                self.mode_banner,
+                "s2p",
+                "Touchstone .s2p — use Settings for filter / Week 3, then Run.",
+            )
+            self._apply_s2p_brief_preset()
+        elif self._is_bmid_dataset():
+            set_mode_banner(
+                self.mode_banner,
+                "bmid",
+                "UM-BMID — pass-through recommended (data already cleaned).",
+            )
+            self._apply_bmid_passthrough_preset()
+        else:
+            set_mode_banner(
+                self.mode_banner,
+                "info",
+                "General dataset — adjust Settings as needed, or use BMID pass-through if already clean.",
+            )
+
     def _is_touchstone_s2p_dataset(self) -> bool:
-        return self.dataset is not None and self.dataset.file_path.lower().endswith(".s2p")
+        return self.dataset is not None and self.dataset.file_path.lower().endswith(
+            ".s2p"
+        )
 
     def _reset_auxiliary_inputs(self) -> None:
         self.repeated_measurement_paths = []
@@ -263,6 +380,7 @@ class PreprocessingPanel(QWidget):
         enabled = self._is_touchstone_s2p_dataset()
         self.repeated_button.setEnabled(enabled)
         self.reference_button.setEnabled(enabled)
+        self.spike_combo.setEnabled(enabled)
         self.touchstone_hint_label.setVisible(True)
         if enabled:
             self.touchstone_hint_label.setText(
@@ -277,7 +395,11 @@ class PreprocessingPanel(QWidget):
         if not self._is_touchstone_s2p_dataset():
             return
 
-        start_dir = self.dataset.file_path.rsplit("\\", 1)[0] if self.dataset is not None and "\\" in self.dataset.file_path else ""
+        start_dir = (
+            self.dataset.file_path.rsplit("\\", 1)[0]
+            if self.dataset is not None and "\\" in self.dataset.file_path
+            else ""
+        )
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Select Repeated Touchstone Measurements",
@@ -288,15 +410,25 @@ class PreprocessingPanel(QWidget):
             return
 
         current_path = self.dataset.file_path if self.dataset is not None else None
-        self.repeated_measurement_paths = [path for path in file_paths if path != current_path]
-        self.repeated_label.setText(f"{len(self.repeated_measurement_paths)} repeated file(s) selected.")
-        self._log(f"Selected {len(self.repeated_measurement_paths)} repeated .s2p file(s) for averaging.")
+        self.repeated_measurement_paths = [
+            path for path in file_paths if path != current_path
+        ]
+        self.repeated_label.setText(
+            f"{len(self.repeated_measurement_paths)} repeated file(s) selected."
+        )
+        self._log(
+            f"Selected {len(self.repeated_measurement_paths)} repeated .s2p file(s) for averaging."
+        )
 
     def _select_reference_dataset(self) -> None:
         if not self._is_touchstone_s2p_dataset():
             return
 
-        start_dir = self.dataset.file_path.rsplit("\\", 1)[0] if self.dataset is not None and "\\" in self.dataset.file_path else ""
+        start_dir = (
+            self.dataset.file_path.rsplit("\\", 1)[0]
+            if self.dataset is not None and "\\" in self.dataset.file_path
+            else ""
+        )
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Reference Touchstone Measurement",
@@ -307,14 +439,20 @@ class PreprocessingPanel(QWidget):
             return
 
         if self.dataset is not None and file_path == self.dataset.file_path:
-            QMessageBox.warning(self, "Invalid Reference", "Select a different .s2p file as the reference dataset.")
+            QMessageBox.warning(
+                self,
+                "Invalid Reference",
+                "Select a different .s2p file as the reference dataset.",
+            )
             return
 
         self.reference_dataset_path = file_path
         self.reference_label.setText(file_path.split("\\")[-1])
         self._log(f"Selected reference .s2p file: {file_path}")
 
-    def _load_auxiliary_datasets(self) -> tuple[list[MicrowaveDataset] | None, MicrowaveDataset | None]:
+    def _load_auxiliary_datasets(
+        self,
+    ) -> tuple[list[MicrowaveDataset] | None, MicrowaveDataset | None]:
         if not self._is_touchstone_s2p_dataset():
             return None, None
 
@@ -322,7 +460,11 @@ class PreprocessingPanel(QWidget):
         for path in self.repeated_measurement_paths:
             repeated_datasets.append(load_dataset(path))
 
-        reference_dataset = load_dataset(self.reference_dataset_path) if self.reference_dataset_path else None
+        reference_dataset = (
+            load_dataset(self.reference_dataset_path)
+            if self.reference_dataset_path
+            else None
+        )
         return repeated_datasets or None, reference_dataset
 
     def on_run_clicked(self) -> None:
@@ -336,7 +478,9 @@ class PreprocessingPanel(QWidget):
             None. Side effects: disables Run button, starts worker thread.
         """
         if self.dataset is None:
-            QMessageBox.warning(self, "No Dataset", "Please load a dataset in Module 1 first.")
+            QMessageBox.warning(
+                self, "No Dataset", "Please load a dataset in Module 1 first."
+            )
             return
 
         try:
@@ -354,10 +498,14 @@ class PreprocessingPanel(QWidget):
             filter_method=self.filter_combo.currentText(),
             calibration_method=self.calibration_combo.currentText(),
             normalization_method=self.normalization_combo.currentText(),
-            do_background_subtraction=(self.background_combo.currentText() == "enabled"),
+            do_background_subtraction=(
+                self.background_combo.currentText() == "enabled"
+            ),
             artifact_method=self.artifact_combo.currentText(),
             repeated_measurements=repeated_measurements,
             reference_dataset=reference_dataset,
+            spike_detection_method=self.spike_combo.currentText(),
+            enable_week3=(self.week3_combo.currentText() == "enabled"),
         )
 
         self.run_button.setEnabled(False)
@@ -384,18 +532,69 @@ class PreprocessingPanel(QWidget):
         self._log("Preprocessing completed successfully.", "SUCCESS")
         if result.validation_report is not None:
             if result.validation_report.averaging_performed:
-                self._log("Complex averaging was applied using the selected repeated .s2p measurements.")
+                self._log(
+                    "Complex averaging was applied using the selected repeated .s2p measurements."
+                )
             if result.validation_report.reference_subtraction_performed:
-                self._log("Complex reference subtraction was applied using the selected reference .s2p measurement.")
+                self._log(
+                    "Complex reference subtraction was applied using the selected reference .s2p measurement."
+                )
+        if result.week3_result is not None:
+            self._log(
+                f"Week 3 time-domain ready (Δt={result.week3_result.delta_t_s:.3e} s, "
+                f"N={result.week3_result.time_s.shape[0]})."
+            )
         self._populate_summary(result)
         self._plot_result(result)
+        self.workspace_tabs.setCurrentIndex(0)
         self.run_button.setEnabled(True)
+        self.export_button.setEnabled(True)
         self.preprocessing_completed.emit(result)
+
+    def on_export_handoff_clicked(self) -> None:
+        if self.last_result is None:
+            QMessageBox.warning(
+                self,
+                "No Result",
+                "Run preprocessing before exporting the Module 3 handoff.",
+            )
+            return
+
+        default_name = "module3_handoff.mat"
+        if self.dataset is not None:
+            stem = os.path.splitext(os.path.basename(self.dataset.file_name))[0]
+            default_name = f"{stem}_module3_handoff.mat"
+
+        mat_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Module 3 Handoff (.mat)",
+            os.path.join("results", default_name),
+            "MATLAB Files (*.mat)",
+        )
+        if not mat_path:
+            return
+
+        csv_path = os.path.splitext(mat_path)[0] + ".csv"
+        try:
+            written = export_module3_handover(
+                self.last_result, mat_path, csv_path=csv_path
+            )
+            self._log(f"Exported Module 3 handoff: {written} (+ CSV + JSON params)")
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Wrote:\n{written}\n{csv_path}\n{os.path.splitext(mat_path)[0]}.json",
+            )
+        except Exception as exc:
+            self._log(f"Handoff export failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Export Error", str(exc))
 
     def _populate_summary(self, result: PreprocessingResult) -> None:
         info = result.quality_report.to_display_dict()
         if result.validation_report is not None:
             info.update(result.validation_report.to_display_dict())
+        if result.week3_result is not None:
+            info.update(result.week3_result.to_display_dict())
         self.summary_table.setRowCount(len(info))
         for row, (key, value) in enumerate(info.items()):
             self.summary_table.setItem(row, 0, QTableWidgetItem(str(key)))
@@ -425,15 +624,23 @@ class PreprocessingPanel(QWidget):
         ax1.grid(True, alpha=0.3)
 
         ax2 = self.figure.add_subplot(2, 2, 2)
-        ax2.plot(freqs_ghz, 20 * np.log10(np.abs(proc_flat[:, trace_idx]) + 1e-12), color="darkorange")
+        ax2.plot(
+            freqs_ghz,
+            20 * np.log10(np.abs(proc_flat[:, trace_idx]) + 1e-12),
+            color="darkorange",
+        )
         ax2.set_title("Processed Signal")
         ax2.set_xlabel("Frequency (GHz)")
         ax2.set_ylabel("Magnitude (dB)")
         ax2.grid(True, alpha=0.3)
 
         ax3 = self.figure.add_subplot(2, 2, 3)
-        ax3.plot(freqs_ghz, np.abs(orig_flat[:, trace_idx]), label="Original", alpha=0.7)
-        ax3.plot(freqs_ghz, np.abs(proc_flat[:, trace_idx]), label="Processed", alpha=0.7)
+        ax3.plot(
+            freqs_ghz, np.abs(orig_flat[:, trace_idx]), label="Original", alpha=0.7
+        )
+        ax3.plot(
+            freqs_ghz, np.abs(proc_flat[:, trace_idx]), label="Processed", alpha=0.7
+        )
         ax3.set_title("Comparison Plot")
         ax3.set_xlabel("Frequency (GHz)")
         ax3.set_ylabel("Magnitude (linear)")
@@ -461,56 +668,90 @@ class PreprocessingPanel(QWidget):
         raw_freqs_ghz = touchstone.raw_frequencies_hz / 1e9
         uniform_freqs_ghz = touchstone.uniform_frequencies_hz / 1e9
 
+        # Brief items 12–13: raw |S21| dB, wrapped phase, real, imag BEFORE preprocess
         ax1 = self.figure.add_subplot(3, 2, 1)
         ax1.plot(raw_freqs_ghz, touchstone.raw_magnitude_db, color="tab:blue")
-        ax1.set_title("Raw S21 Magnitude")
+        ax1.set_title("Before — |S21| (dB)")
         ax1.set_xlabel("Frequency (GHz)")
         ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True, alpha=0.3)
 
         ax2 = self.figure.add_subplot(3, 2, 2)
-        ax2.plot(raw_freqs_ghz, touchstone.wrapped_phase_deg, label="Wrapped", alpha=0.8)
-        ax2.plot(raw_freqs_ghz, touchstone.unwrapped_phase_deg, label="Unwrapped", alpha=0.8)
-        ax2.set_title("S21 Phase")
+        ax2.plot(raw_freqs_ghz, touchstone.wrapped_phase_deg, color="tab:purple")
+        ax2.set_title("Before — Wrapped Phase")
         ax2.set_xlabel("Frequency (GHz)")
         ax2.set_ylabel("Phase (deg)")
-        ax2.legend(fontsize=8)
         ax2.grid(True, alpha=0.3)
 
         ax3 = self.figure.add_subplot(3, 2, 3)
-        ax3.plot(raw_freqs_ghz, touchstone.raw_s21.real, label="Raw Real", alpha=0.8)
-        ax3.plot(uniform_freqs_ghz, touchstone.filtered_s21.real, label="Filtered Real", alpha=0.8)
-        ax3.set_title("Real Part")
+        ax3.plot(raw_freqs_ghz, touchstone.raw_s21.real, color="tab:green")
+        ax3.set_title("Before — Real(S21)")
         ax3.set_xlabel("Frequency (GHz)")
         ax3.set_ylabel("Real(S21)")
-        ax3.legend(fontsize=8)
         ax3.grid(True, alpha=0.3)
 
         ax4 = self.figure.add_subplot(3, 2, 4)
-        ax4.plot(raw_freqs_ghz, touchstone.raw_s21.imag, label="Raw Imag", alpha=0.8)
-        ax4.plot(uniform_freqs_ghz, touchstone.filtered_s21.imag, label="Filtered Imag", alpha=0.8)
-        ax4.set_title("Imaginary Part")
+        ax4.plot(raw_freqs_ghz, touchstone.raw_s21.imag, color="tab:red")
+        ax4.set_title("Before — Imag(S21)")
         ax4.set_xlabel("Frequency (GHz)")
         ax4.set_ylabel("Imag(S21)")
-        ax4.legend(fontsize=8)
         ax4.grid(True, alpha=0.3)
 
         ax5 = self.figure.add_subplot(3, 2, 5)
-        ax5.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.corrected_s21) + 1e-12), label="Corrected", alpha=0.75)
-        ax5.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.filtered_s21) + 1e-12), label="Filtered", alpha=0.75)
-        ax5.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.windowed_s21) + 1e-12), label="Hamming", alpha=0.75)
-        ax5.set_title("Processed Variants")
+        ax5.plot(
+            raw_freqs_ghz, touchstone.wrapped_phase_deg, label="Wrapped", alpha=0.8
+        )
+        ax5.plot(
+            raw_freqs_ghz, touchstone.unwrapped_phase_deg, label="Unwrapped", alpha=0.8
+        )
+        ax5.set_title("Phase Unwrap")
         ax5.set_xlabel("Frequency (GHz)")
-        ax5.set_ylabel("Magnitude (dB)")
+        ax5.set_ylabel("Phase (deg)")
         ax5.legend(fontsize=8)
         ax5.grid(True, alpha=0.3)
 
         ax6 = self.figure.add_subplot(3, 2, 6)
-        ax6.plot(raw_freqs_ghz, 20 * np.log10(np.abs(touchstone.raw_s21) + 1e-12), label="Raw", alpha=0.75)
-        ax6.plot(uniform_freqs_ghz, 20 * np.log10(np.abs(touchstone.filtered_s21) + 1e-12), label="Processed", alpha=0.75)
-        ax6.set_title("Raw vs Processed")
-        ax6.set_xlabel("Frequency (GHz)")
-        ax6.set_ylabel("Magnitude (dB)")
+        week3 = result.week3_result
+        if week3 is not None and week3.time_s.size:
+            t_ns = week3.time_s * 1e9
+            ax6.plot(
+                t_ns,
+                np.abs(week3.time_hamming[:, 0]),
+                label="|time Hamming|",
+                alpha=0.8,
+            )
+            if week3.time_reference_subtracted is not None:
+                ax6.plot(
+                    t_ns,
+                    np.abs(week3.time_reference_subtracted[:, 0]),
+                    label="|time ref−|",
+                    alpha=0.8,
+                )
+            ax6.set_title("Week 3 — Time Domain")
+            ax6.set_xlabel("Time (ns)")
+            ax6.set_ylabel("|s(t)|")
+        else:
+            ax6.plot(
+                uniform_freqs_ghz,
+                20 * np.log10(np.abs(touchstone.corrected_s21) + 1e-12),
+                label="Corrected",
+                alpha=0.75,
+            )
+            ax6.plot(
+                uniform_freqs_ghz,
+                20 * np.log10(np.abs(touchstone.filtered_s21) + 1e-12),
+                label="Filtered",
+                alpha=0.75,
+            )
+            ax6.plot(
+                uniform_freqs_ghz,
+                20 * np.log10(np.abs(touchstone.windowed_s21) + 1e-12),
+                label="Hamming",
+                alpha=0.75,
+            )
+            ax6.set_title("After — Processed Variants")
+            ax6.set_xlabel("Frequency (GHz)")
+            ax6.set_ylabel("Magnitude (dB)")
         ax6.legend(fontsize=8)
         ax6.grid(True, alpha=0.3)
 
@@ -527,8 +768,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Microwave Imaging Framework — Data Acquisition, Preprocessing & Reconstruction")
-        self.resize(1150, 950)
+        self.setWindowTitle("Microwave Imaging Framework")
+        self.resize(1200, 900)
 
         self.upload_page = UploadPage()
         self.preprocessing_panel = PreprocessingPanel()
@@ -536,9 +777,9 @@ class MainWindow(QMainWindow):
         self._session_dataset: MicrowaveDataset | None = None
 
         tabs = QTabWidget()
-        tabs.addTab(self.upload_page, "1. Data Acquisition")
-        tabs.addTab(self.preprocessing_panel, "2. Signal Preprocessing")
-        tabs.addTab(self.reconstruction_panel, "3. Reconstruction")
+        tabs.addTab(self.upload_page, "Acquisition")
+        tabs.addTab(self.preprocessing_panel, "Preprocessing")
+        tabs.addTab(self.reconstruction_panel, "Reconstruction")
         self.setCentralWidget(tabs)
 
         toolbar = QToolBar("Session")
@@ -550,13 +791,19 @@ class MainWindow(QMainWindow):
         )
         self.report_action.triggered.connect(self._download_final_report)
         self.auto_report_label = QLabel("Auto-report: waiting for pipeline…")
-        self.auto_report_label.setStyleSheet("color: #555; padding-left: 12px;")
+        self.auto_report_label.setObjectName("hintLabel")
         toolbar.addWidget(self.auto_report_label)
 
         self.upload_page.dataset_loaded.connect(self._on_dataset_loaded)
-        self.preprocessing_panel.preprocessing_completed.connect(self._on_preprocessing_completed)
-        self.reconstruction_panel.export_report_button.clicked.connect(self._download_final_report)
-        self.reconstruction_panel.reconstruction_completed.connect(self._on_reconstruction_completed)
+        self.preprocessing_panel.preprocessing_completed.connect(
+            self._on_preprocessing_completed
+        )
+        self.reconstruction_panel.export_report_button.clicked.connect(
+            self._download_final_report
+        )
+        self.reconstruction_panel.reconstruction_completed.connect(
+            self._on_reconstruction_completed
+        )
         self._tabs = tabs
         self._results_dir = os.path.join(os.getcwd(), "results")
         self._latest_report_paths: dict[str, str] = {}
@@ -568,7 +815,9 @@ class MainWindow(QMainWindow):
         self.reconstruction_panel.last_snapshot = None
         self.reconstruction_panel.export_report_button.setEnabled(False)
         self._tabs.setCurrentWidget(self.preprocessing_panel)
-        self.auto_report_label.setText("Auto-report: dataset loaded — run preprocess/reconstruct")
+        self.auto_report_label.setText(
+            "Auto-report: dataset loaded — run preprocess/reconstruct"
+        )
 
     def _on_preprocessing_completed(self, result: PreprocessingResult) -> None:
         self.reconstruction_panel.set_processed_dataset(result.processed_dataset)
@@ -669,7 +918,9 @@ class MainWindow(QMainWindow):
             file_stem = f"session_report_{stamp}"
             figure_paths: list[str] = []
             if ctx.reconstruction is not None:
-                figure_paths = self.reconstruction_panel.save_figures(target_dir, file_stem)
+                figure_paths = self.reconstruction_panel.save_figures(
+                    target_dir, file_stem
+                )
             paths = write_session_report(
                 ctx,
                 output_dir=target_dir,

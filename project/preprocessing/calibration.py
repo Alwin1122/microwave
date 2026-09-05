@@ -37,9 +37,7 @@ logger = get_logger(__name__)
 _EPS = 1e-12
 
 
-def reference_calibration(
-    s_params: np.ndarray, reference: np.ndarray
-) -> np.ndarray:
+def reference_calibration(s_params: np.ndarray, reference: np.ndarray) -> np.ndarray:
     """
     Purpose:
         Normalize measured S-parameters against a known reference sweep

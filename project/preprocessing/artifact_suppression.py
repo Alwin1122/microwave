@@ -84,8 +84,7 @@ def background_subtraction(
     if background is not None:
         if background.shape[0] != s_params.shape[0]:
             raise InvalidSParameterError(
-                "Background reference length does not match number of "
-                "frequency points."
+                "Background reference length does not match number of frequency points."
             )
         bg = background
         if bg.ndim == 1:
@@ -110,7 +109,9 @@ def background_subtraction(
     return result.reshape(shape)
 
 
-def svd_clutter_removal(s_params: np.ndarray, n_components_removed: int = 1) -> np.ndarray:
+def svd_clutter_removal(
+    s_params: np.ndarray, n_components_removed: int = 1
+) -> np.ndarray:
     """
     Purpose:
         Remove the dominant singular components of the trace matrix,

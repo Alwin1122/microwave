@@ -37,3 +37,5 @@ project/datasets/fd_data_*.mat
 project/results/session_report_*
 project/results/latest_session_report*
 project/session_report_*
+project/results/*_module3_handoff.*
+project/results/*_handoff.*

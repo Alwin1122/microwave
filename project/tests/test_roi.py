@@ -46,6 +46,15 @@ class TestROIDetector(unittest.TestCase):
         self.assertLess(abs(peak.centroid[0] - 31.5), 6.0)
         self.assertGreater(abs(off.centroid[0] - 31.5), 8.0)
 
+    def test_tight_peak_snaps_to_max_inside_blob(self):
+        image = np.zeros((48, 48), dtype=float)
+        image[10:20, 20:35] = 2.0
+        image[12, 33] = 6.0  # peak inside the same blob
+        tight = detect_roi(image, threshold_ratio=0.5, min_area=4, margin=2, sigma=0.2, tight_peak=True)
+        self.assertAlmostEqual(tight.centroid[0], 33.0, delta=1.5)
+        self.assertAlmostEqual(tight.centroid[1], 12.0, delta=1.5)
+        self.assertEqual(tight.mode, "tight")
+
     def test_roi_centroid_meters(self):
         image = np.zeros((11, 11), dtype=float)
         image[8, 2] = 1.0

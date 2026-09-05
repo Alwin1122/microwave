@@ -23,6 +23,7 @@ def select_best_beamformer(
     y_span: tuple[float, float] | None = None,
     tumor_xy_m: tuple[float, float] | None = None,
     prefer_off_center: bool = True,
+    tight_peak: bool = False,
 ) -> tuple[str, dict[str, dict[str, float]]]:
     """Select the best beamformer using quality metrics and optional GT distance.
 
@@ -85,6 +86,7 @@ def select_best_beamformer(
             roi = detect_roi(
                 image,
                 prefer_off_center=prefer_off_center,
+                tight_peak=tight_peak,
                 x_span=x_span,
                 y_span=y_span,
                 prior_xy_m=None,

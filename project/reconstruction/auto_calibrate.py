@@ -31,6 +31,7 @@ class GeometryCandidate:
     use_bmid_phase_delay_radius: bool = False
     wave_speed: float = 3.0e8
     prefer_off_center_roi: bool = False
+    tight_peak_roi: bool = False
 
     def label(self) -> str:
         flip = "none"
@@ -42,7 +43,12 @@ class GeometryCandidate:
             flip = "y"
         rot = "CW" if self.antenna_clockwise else "CCW"
         phase = "on" if self.use_bmid_phase_delay_radius else "off"
-        roi = "offctr" if self.prefer_off_center_roi else "peak"
+        if self.tight_peak_roi:
+            roi = "tight"
+        elif self.prefer_off_center_roi:
+            roi = "offctr"
+        else:
+            roi = "peak"
         return (
             f"ang={self.antenna_angle_offset_deg:.0f}° {rot} flip={flip} "
             f"arc={self.antenna_span_deg:.0f}° phase={phase} c={self.wave_speed:.2e} roi={roi}"
@@ -128,7 +134,7 @@ def build_geometry_search_space(
         for c in (3.0e8, 2.1e8, 1.8e8):
             if all(abs(c - s) > 1e6 for s in speeds):
                 speeds.append(c)
-    roi_modes = [False, True]
+    roi_modes = [(False, False), (True, False), (False, True)]  # peak, off-center, tight
 
     candidates: list[GeometryCandidate] = []
     for angle in angles:
@@ -137,7 +143,7 @@ def build_geometry_search_space(
                 for span in arcs:
                     for phase in phases:
                         for speed in speeds:
-                            for prefer_off in roi_modes:
+                            for prefer_off, tight in roi_modes:
                                 candidates.append(
                                     GeometryCandidate(
                                         antenna_angle_offset_deg=angle,
@@ -148,6 +154,7 @@ def build_geometry_search_space(
                                         use_bmid_phase_delay_radius=phase,
                                         wave_speed=float(speed),
                                         prefer_off_center_roi=prefer_off,
+                                        tight_peak_roi=tight,
                                     )
                                 )
     return candidates
@@ -187,6 +194,7 @@ def _evaluate_image(
     roi = detect_roi(
         image,
         prefer_off_center=geometry.prefer_off_center_roi,
+        tight_peak=geometry.tight_peak_roi,
         x_span=config.x_span,
         y_span=config.y_span,
     )
@@ -198,10 +206,9 @@ def _evaluate_image(
     gt_dist = None
     if tumor_xy_m is not None:
         gt_dist = float(np.hypot(centroid_m[0] - tumor_xy_m[0], centroid_m[1] - tumor_xy_m[1]))
-        # Lower distance is better; keep score positive and comparable.
+        # Localization first; tiny compactness term only as a tie-break.
         score = 1.0 / (gt_dist + 1e-4)
-        # Mild preference for compact ROIs (less whole-image latch).
-        score *= 1.0 / (1.0 + max(0, roi.area - 200) / 2000.0)
+        score += 1e-4 / (1.0 + roi.area / 2000.0)
     else:
         # No GT: prefer contrasty images with an off-center compact ROI.
         ny, nx = image.shape
@@ -258,6 +265,7 @@ def auto_calibrate_reconstruction(
     include_wave_speeds: bool = False,
     top_k_full: int = 8,
     baseline_prefer_off_center: bool = False,
+    baseline_tight_peak: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> AutoCalibrateResult:
     """Search reconstruction settings and return the best trial.
@@ -297,9 +305,10 @@ def auto_calibrate_reconstruction(
         use_bmid_phase_delay_radius=base_config.use_bmid_phase_delay_radius,
         wave_speed=base_config.wave_speed,
         prefer_off_center_roi=baseline_prefer_off_center,
+        tight_peak_roi=baseline_tight_peak,
     )
-    # Ensure both ROI modes for the current geometry are searched.
-    for prefer_off in (False, True):
+    # Ensure peak / off-center / tight for the current geometry are searched.
+    for prefer_off, tight in ((False, False), (True, False), (False, True)):
         g = GeometryCandidate(
             antenna_angle_offset_deg=baseline_geometry.antenna_angle_offset_deg,
             antenna_clockwise=baseline_geometry.antenna_clockwise,
@@ -309,6 +318,7 @@ def auto_calibrate_reconstruction(
             use_bmid_phase_delay_radius=baseline_geometry.use_bmid_phase_delay_radius,
             wave_speed=baseline_geometry.wave_speed,
             prefer_off_center_roi=prefer_off,
+            tight_peak_roi=tight,
         )
         if g not in geometries:
             geometries.insert(0, g)

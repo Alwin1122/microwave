@@ -53,6 +53,7 @@ from preprocessing.preprocessing_pipeline import (
     estimate_snr_db,
     run_preprocessing_pipeline,
 )
+from preprocessing.touchstone_s21 import _correct_isolated_samples, _nrmse
 from utils.exceptions import InvalidSParameterError
 
 
@@ -336,6 +337,7 @@ class TestTouchstoneS21Pipeline(unittest.TestCase):
                 dataset,
                 PreprocessingConfig(
                     filter_method="none",
+                    enable_week3=False,
                     repeated_measurements=[repeated_dataset],
                     reference_dataset=reference_dataset,
                 ),
@@ -349,6 +351,54 @@ class TestTouchstoneS21Pipeline(unittest.TestCase):
             os.remove(primary)
             os.remove(repeated)
             os.remove(reference)
+
+    def test_touchstone_pipeline_reports_nrmse_by_name(self):
+        path = self._write_touchstone(
+            "_test_nrmse_touchstone.s2p",
+            "\n".join(
+                [
+                    "# GHz S RI R 50",
+                    "1.0 0 0 1.0 0.0 0 0 0 0",
+                    "1.1 0 0 1.0 0.0 0 0 0 0",
+                    "1.2 0 0 1.0 0.0 0 0 0 0",
+                ]
+            ),
+        )
+        try:
+            dataset = load_touchstone_dataset(path)
+            result = run_preprocessing_pipeline(dataset, PreprocessingConfig(filter_method="none"))
+            self.assertIsNotNone(result.validation_report)
+            self.assertIn("NRMSE", result.validation_report.to_display_dict())
+            self.assertAlmostEqual(result.validation_report.nrmse, 0.0, places=6)
+            self.assertEqual(result.validation_report.spike_detection_method, "hampel")
+        finally:
+            os.remove(path)
+
+
+class TestSpikeCorrectionAndNrmse(unittest.TestCase):
+    def test_nrmse_zero_when_identical(self):
+        signal = np.array([1 + 1j, 2 + 0j, 0.5 - 0.5j])
+        self.assertEqual(_nrmse(signal, signal), 0.0)
+
+    def test_median_and_local_detectors_catch_isolated_spike(self):
+        clean = np.ones(11, dtype=complex)
+        spiked = clean.copy()
+        spiked[5] = 50 + 0j
+
+        corrected_median, median_count = _correct_isolated_samples(
+            spiked, method="median", window_size=2, n_sigmas=3.0
+        )
+        corrected_local, local_count = _correct_isolated_samples(
+            spiked, method="local", window_size=2, n_sigmas=3.0
+        )
+        _, hampel_count = _correct_isolated_samples(spiked, method="hampel", window_size=2, n_sigmas=3.0)
+
+        self.assertGreaterEqual(median_count, 1)
+        self.assertGreaterEqual(local_count, 1)
+        self.assertAlmostEqual(abs(corrected_median[5] - 1), 0.0, places=6)
+        self.assertAlmostEqual(abs(corrected_local[5] - 1), 0.0, places=6)
+        # Hampel is stricter (leave-one-out confirm); may or may not flag MAD=0 plateaus.
+        self.assertIsInstance(hampel_count, int)
 
 
 if __name__ == "__main__":

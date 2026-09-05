@@ -18,6 +18,7 @@ class ROIResult:
     area: int
     threshold: float
     score: float
+    mode: str = "peak"
 
 
 _EPS = 1e-12
@@ -58,6 +59,7 @@ def detect_roi(
     sigma: float = 1.0,
     prefer_off_center: bool = False,
     off_center_weight: float = 1.5,
+    tight_peak: bool = False,
     x_span: tuple[float, float] | None = None,
     y_span: tuple[float, float] | None = None,
     prior_xy_m: tuple[float, float] | None = None,
@@ -71,9 +73,10 @@ def detect_roi(
         min_area: Minimum connected-component area to accept.
         margin: Extra pixels to add around the selected bounding box.
         sigma: Gaussian smoothing parameter.
-        prefer_off_center: Boost blobs away from the image center (helps
-            suppress origin ring / clutter common in BMID reconstructions).
+        prefer_off_center: Boost blobs away from the image center.
         off_center_weight: Strength of the off-center boost (>= 0).
+        tight_peak: If True, localize to the intensity peak inside the chosen
+            region and shrink the box (avoids large-blob centroid bias).
         x_span / y_span: Physical extents in meters for prior scoring.
         prior_xy_m: Optional prior location (e.g. tumor GT) in meters.
         prior_weight: Strength of the prior proximity boost.
@@ -84,9 +87,17 @@ def detect_roi(
     if image.ndim != 2:
         raise ValueError("ROI detection expects a 2D reconstruction image.")
 
+    mode = "tight" if tight_peak else ("off_center" if prefer_off_center else "peak")
+    # Tight peak keeps the same blob selection as peak mode, then snaps the
+    # centroid to the intensity maximum inside that blob and shrinks the box.
+    effective_threshold = threshold_ratio
+    if tight_peak:
+        margin = min(margin, 2)
+        sigma = min(sigma, 1.0)
+
     normalized = _normalize_image(image)
     smoothed = gaussian_filter(normalized, sigma=sigma)
-    threshold = float(np.clip(threshold_ratio, 0.0, 1.0))
+    threshold = float(np.clip(effective_threshold, 0.0, 1.0))
     binary = smoothed >= threshold
     binary = binary_opening(binary, structure=np.ones((3, 3), dtype=bool))
 
@@ -94,10 +105,11 @@ def detect_roi(
     if num == 0:
         peak_index = np.unravel_index(int(np.argmax(smoothed)), smoothed.shape)
         y, x = peak_index
-        y0 = max(0, y - margin)
-        y1 = min(smoothed.shape[0], y + margin + 1)
-        x0 = max(0, x - margin)
-        x1 = min(smoothed.shape[1], x + margin + 1)
+        half = 2 if tight_peak else margin
+        y0 = max(0, y - half)
+        y1 = min(smoothed.shape[0], y + half + 1)
+        x0 = max(0, x - half)
+        x1 = min(smoothed.shape[1], x + half + 1)
         mask = np.zeros_like(binary, dtype=bool)
         mask[y0:y1, x0:x1] = True
         area = int(np.sum(mask))
@@ -108,6 +120,7 @@ def detect_roi(
             area=area,
             threshold=threshold,
             score=float(smoothed[peak_index]),
+            mode=mode,
         )
 
     objects = find_objects(labeled)
@@ -116,6 +129,7 @@ def detect_roi(
     best_box: tuple[int, int, int, int] | None = None
     best_centroid = (0.0, 0.0)
     best_area = 0
+    best_component_id = -1
 
     ny, nx = smoothed.shape
     center_x = (nx - 1) / 2.0
@@ -138,16 +152,23 @@ def detect_roi(
         if area < min_area:
             continue
         component_values = smoothed[slc][component_mask]
-        score = float(np.mean(component_values) * np.max(component_values) * area)
+        peak_val = float(np.max(component_values))
+        # Component ranking stays brightness×extent; tight only changes localization.
+        score = float(np.mean(component_values) * peak_val * area)
 
         ys, xs = np.where(labeled == component_id)
-        cx = float(np.mean(xs))
-        cy = float(np.mean(ys))
+        weights = smoothed[ys, xs]
+        wsum = float(np.sum(weights)) + _EPS
+        cx = float(np.sum(xs * weights) / wsum)
+        cy = float(np.sum(ys * weights) / wsum)
+        if tight_peak:
+            local = np.zeros_like(smoothed)
+            local[ys, xs] = smoothed[ys, xs]
+            py, px = np.unravel_index(int(np.argmax(local)), local.shape)
+            cx, cy = float(px), float(py)
 
         if prefer_off_center:
             r_norm = float(np.hypot(cx - center_x, cy - center_y) / max_r)
-            # Soft-suppress origin ring/clutter while still allowing a true
-            # on-axis focus when it is the only bright region.
             center_penalty = 0.2 + 0.8 * r_norm
             score *= center_penalty * (1.0 + float(off_center_weight) * r_norm)
 
@@ -160,19 +181,30 @@ def detect_roi(
         if score <= best_score:
             continue
 
-        y_slice, x_slice = slc
-        y0 = max(0, y_slice.start - margin)
-        y1 = min(smoothed.shape[0], y_slice.stop + margin)
-        x0 = max(0, x_slice.start - margin)
-        x1 = min(smoothed.shape[1], x_slice.stop + margin)
-        full_mask = np.zeros_like(binary, dtype=bool)
-        full_mask[y0:y1, x0:x1] = True
+        if tight_peak:
+            half = max(2, margin)
+            y0 = max(0, int(round(cy)) - half)
+            y1 = min(smoothed.shape[0], int(round(cy)) + half + 1)
+            x0 = max(0, int(round(cx)) - half)
+            x1 = min(smoothed.shape[1], int(round(cx)) + half + 1)
+            full_mask = np.zeros_like(binary, dtype=bool)
+            full_mask[y0:y1, x0:x1] = True
+            best_area = int(np.sum(full_mask))
+        else:
+            y_slice, x_slice = slc
+            y0 = max(0, y_slice.start - margin)
+            y1 = min(smoothed.shape[0], y_slice.stop + margin)
+            x0 = max(0, x_slice.start - margin)
+            x1 = min(smoothed.shape[1], x_slice.stop + margin)
+            full_mask = np.zeros_like(binary, dtype=bool)
+            full_mask[y0:y1, x0:x1] = True
+            best_area = area
 
         best_score = score
         best_mask = full_mask
         best_box = (x0, y0, x1, y1)
         best_centroid = (cx, cy)
-        best_area = area
+        best_component_id = component_id
 
     if best_mask is None or best_box is None:
         return detect_roi(
@@ -183,12 +215,14 @@ def detect_roi(
             sigma=sigma,
             prefer_off_center=prefer_off_center,
             off_center_weight=off_center_weight,
+            tight_peak=tight_peak,
             x_span=x_span,
             y_span=y_span,
             prior_xy_m=prior_xy_m,
             prior_weight=prior_weight,
         )
 
+    del best_component_id
     return ROIResult(
         mask=best_mask,
         bounding_box=best_box,
@@ -196,6 +230,7 @@ def detect_roi(
         area=best_area,
         threshold=threshold,
         score=best_score,
+        mode=mode,
     )
 
 
@@ -207,3 +242,30 @@ def roi_centroid_meters(
 ) -> tuple[float, float]:
     """Convert an ROI pixel centroid to meters using the reconstruction FOV."""
     return _pixel_to_meters(roi.centroid[0], roi.centroid[1], image_shape, x_span, y_span)
+
+
+def tumor_likelihood_features(
+    image: np.ndarray,
+    roi: ROIResult,
+) -> dict[str, float]:
+    """Features that tend to separate healthy center-clutter from tumor foci.
+
+    On BMID peak-ROI runs, healthy scans often show a large near-origin blob
+    (high area, low r_norm). Tumor foci are usually smaller and more off-center.
+    """
+    ny, nx = image.shape
+    cx = (nx - 1) / 2.0
+    cy = (ny - 1) / 2.0
+    r_norm = float(np.hypot(roi.centroid[0] - cx, roi.centroid[1] - cy) / (np.hypot(cx, cy) + _EPS))
+    peak = float(np.max(image))
+    mean = float(np.mean(image))
+    area = float(roi.area)
+    # Higher => more tumor-like: off-center and not a FOV-filling clutter sheet.
+    suspicion = float(r_norm * (1.0 / (1.0 + area / 800.0)) * (peak / (mean + _EPS)))
+    return {
+        "r_norm": r_norm,
+        "roi_area": area,
+        "peak_over_mean": peak / (mean + _EPS),
+        "compactness": float(peak / (area + 1.0)),
+        "suspicion": suspicion,
+    }

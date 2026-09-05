@@ -1,241 +1,166 @@
 # Microwave Imaging Framework
 
-**Development of a Data Processing and Image Reconstruction Framework Using Standardized Measurement Data**
+Desktop **PySide6** app for microwave breast-imaging workflows:
 
-Desktop PySide6 application with three modules:
+1. **Data Acquisition** — load & validate `.mat` / Touchstone  
+2. **Signal Preprocessing** — clean S21 (or pass-through for already-clean data)  
+3. **Reconstruction** — DAS / DMAS / DMAS-D4 + ROI  
 
-| Module | Role |
-|--------|------|
-| **1 — Data Acquisition** | Import, validate, and summarize MATLAB (`.mat`) and Touchstone (`.s1p/.s2p/.s4p/.s8p`) measurements as a canonical `MicrowaveDataset`. |
-| **2 — Signal Preprocessing** | Clean frequency-domain data. **`.s2p` files** follow the UG S21 brief (`preprocessing/touchstone_s21.py`). **Other formats** use the general multi-trace pipeline (filter → calibrate → normalize → hybrid artifact suppression). |
-| **3 — Reconstruction** | IFFT + DAS / DMAS / DMAS-D4 beamforming, automatic beamformer selection, ROI detection and high-resolution refine. |
+| Path | Typical input | Module 2 | Module 3 |
+|------|----------------|----------|----------|
+| **UM-BMID** | `fd_data_s21_adi.mat` (200 scans) | **Pass-through (all none)** — `_adi` is already cleaned | Imaging + ROI / Auto Tweak |
+| **UG `.s2p` brief** | Touchstone `.s2p` | Full S21 Week 1–3 pipeline | Handoff `.mat` → reconstruct |
 
-Brief sources (kept alongside the local project folder): `Module_2_Signal_Preprocessing_Bullets_for_UG_Students.pdf`, `Signal Preprocessing_21082026.pdf`.
-
-### UM-BMID breast scans
-
-Place clean cubes in `datasets/`, e.g. `fd_data_s21_adi.mat` + matching `md_list_s21_adi.mat`.
-
-> Large `fd_data_*.mat` cubes are **gitignored** (~220 MB). Download from UM-BMID / IEEE DataPort and place them locally. See `docs/BMID_DEVELOPMENT_STEPS.md` for the full step-by-step integration and experiment log.
-
-- Loading a BMID `fd_data_*.mat` opens a **scan picker** (tumor / healthy filter).
-- Each scan becomes a `(1001 × 72)` `MicrowaveDataset` with **1–8 GHz** frequency axis and **antenna radius 18 cm** from metadata.
-- Tumor ground truth (`tum_x`, `tum_y`) is drawn as a green **X** on reconstruction plots.
-- Because `_adi` data is already reference-subtracted, use mild filtering in Module 2; avoid treating the whole 200-scan cube as one measurement.
-- Module 3 includes **Auto Tweak Settings** (geometry + beamformer search) while keeping all manual controls.
----
-
-## 1. Folder Structure
-
-```
-project/
-main.py                          # Application entry point
-requirements.txt
-
-gui/
-    main_window.py               # Tabs: Acquisition + Preprocessing (+ worker)
-    upload_page.py               # Module 1 GUI
-    reconstruction_page.py       # Module 3 GUI
-
-data_loader/
-    loader.py                    # Unified load_dataset() dispatcher
-    matlab_loader.py             # .mat (legacy + v7.3/HDF5)
-    bmid_loader.py               # UM-BMID fd_data scan extract + metadata
-    touchstone_loader.py         # .sNp + S21-only .s2p helpers
-    validator.py
-    dataset_info.py              # MicrowaveDataset / DatasetSummary
-    physical_metadata.py         # Wave speed / radius / FOV from comments
-
-preprocessing/
-    touchstone_s21.py            # Module 2 UG S21 track (.s2p)
-    filtering.py
-    calibration.py
-    normalization.py
-    artifact_suppression.py      # Mean/BG subtract + SVD + hybrid (array path)
-    preprocessing_pipeline.py    # Orchestration (routes .s2p → S21 track)
-
-reconstruction/
-    ifft.py · das.py · dmas.py · dmas_d4.py
-    reconstruction_manager.py
-
-quality/                         # Beamformer scoring metrics
-roi/                             # ROI detect + refine hand-off
-utils/                           # Exceptions + logger / StatusLog
-datasets/                        # Samples + generate_sample_data.py
-results/
-tests/
-```
+Brief PDFs (project folder): `Module_2_Signal_Preprocessing_Bullets_for_UG_Students.pdf`, `Signal Preprocessing_21082026.pdf` — these describe the **`.s2p`** track, not BMID cleaning.
 
 ---
 
-## 2. Installation
+## Quick start
 
 ```bash
+cd project
 python -m venv .venv_local
-# Windows:
-.\.venv_local\Scripts\activate
+.\.venv_local\Scripts\activate          # Windows
 pip install -r requirements.txt
-```
-
-> Bundled `venv` / `.venv` folders may point at another machine’s Python. Prefer a fresh local venv (e.g. `.venv_local`) on this PC.
-
-## 3. Running the Application
-
-```bash
 python main.py
 ```
-
-Tabs:
-
-1. **Data Acquisition** — Load Dataset (`.mat` / `.sNp`). Sample files live in `datasets/`.
-2. **Signal Preprocessing** — Configure filters; for `.s2p` optionally select **repeated** and **reference** files, then Run Preprocessing.
-3. **Reconstruction** — Choose processed or raw source, grid / radius / wave speed, run DAS·DMAS·DMAS-D4, view ROI refine.
-4. **Download Final Report** — optional copy-to-folder. Reports are also **auto-saved** after preprocessing and reconstruction to `results/latest_session_report.md` (+ `.json` / PNGs), with a timestamped archive copy each run.
-
-### Sample datasets
-
-```bash
-python datasets/generate_sample_data.py
-```
-
-Produces `sample_matlab.mat`, `sample_matlab_v73.mat`, `sample_touchstone.s2p`, `corrupted.mat`.
-
-## 4. Running Tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-**68** unit tests cover loaders, S21 preprocessing, the general pipeline, reconstruction, and ROI.
+Sample files: `python datasets/generate_sample_data.py`
+
+### BMID demo (already-clean cube)
+
+1. Place `fd_data_s21_adi.mat` + `md_list_s21_adi.mat` in `datasets/` (large cubes are gitignored).  
+2. Module 1 → load cube → pick a scan.  
+3. Module 2 → **Preset: BMID pass-through** (auto-applied) → Run.  
+4. Module 3 → radius **18 cm**, FOV **12×12 cm**, `c = 3e8`, Peak ROI, Prefer/Force **DMAS-D4**.
+
+### Touchstone `.s2p` demo (UG brief)
+
+1. Module 1 → load `sample_touchstone.s2p` (or your file).  
+2. Module 2 → **Preset: .s2p brief defaults** → optional repeated/reference → Run → Export Module 3 Handoff.  
+3. Module 3 → reconstruct from processed data.
 
 ---
 
-## 5. Module 1 — Data Acquisition
-
-- Entry: `data_loader/loader.py` → always returns `MicrowaveDataset`.
-- MATLAB: legacy (`scipy.io.loadmat`) and v7.3/HDF5 (`h5py`), auto-detected.
-- Touchstone: full network via `scikit-rf`; S21-only helpers in `touchstone_loader.py` for Module 2.
-- Validation: existence/extension/size, finite monotonic frequencies, finite non-zero S-parameters.
-
----
-
-## 6. Module 2 — Two pipelines
-
-### A. Touchstone `.s2p` S21 track (UG brief)
-
-Triggered automatically when the loaded file is Touchstone **`.s2p`**:
-
-`process_touchstone_s21_dataset()` in `preprocessing/touchstone_s21.py`.
-
-Order in code (matches the bullets PDF):
+## Folder structure
 
 ```
-Header + S21 extract → complex linear → validate/sort → uniform grid
-→ phase wrap/unwrap → Hampel spike fix → optional complex average
-→ optional complex reference subtract → mild filter (R/I separately)
-→ Hamming windowed copy (+ optional |S21| normalize) → validation report
+project/
+  main.py
+  requirements.txt
+  gui/                 # Module 1–3 panels + shared styles
+  data_loader/         # .mat, BMID, Touchstone → MicrowaveDataset
+  preprocessing/       # S21 track, Week 3, general pipeline, handoff export
+  reconstruction/      # IFFT, DAS, DMAS, DMAS-D4, Auto Tweak
+  quality/  roi/  utils/
+  datasets/  results/  tests/
+  docs/canvases/       # Flowchart canvas (also on GitHub)
 ```
 
-Processed hand-off to Module 3: filtered complex `S21(f)` on a uniform Hz grid. Hamming and phase arrays are stored under `processed_dataset.metadata["module2_s21"]`.
+---
 
-### B. General / MATLAB multi-trace track
+## Flowcharts
 
+Interactive canvas: [`docs/canvases/module1-module2-flowchart.canvas.tsx`](docs/canvases/module1-module2-flowchart.canvas.tsx)  
+(On GitHub, open the **`breawave`** branch — default remote branch may be `master`.)
+
+### End-to-end
+
+```mermaid
+flowchart TD
+    A["Module 1 — Load + validate"] --> B{"File type?"}
+    B -->|".s2p"| C["Module 2 — S21 UG track"]
+    B -->|".mat / BMID"| D["Module 2 — pass-through or general"]
+    C --> E["PreprocessingResult + Week 3"]
+    D --> E
+    E --> F["Export handoff .mat optional"]
+    E --> G["Module 3 — DAS / DMAS / DMAS-D4 + ROI"]
 ```
-Raw → Noise Filtering → Calibration → Normalization →
-Background Subtraction → Artifact Suppression (SVD / hybrid) → Processed
+
+### `.s2p` preprocessing (UG brief)
+
+```mermaid
+flowchart TD
+    A[".s2p → extract S21"] --> B["Complex linear"]
+    B --> C["Validate + sort + uniform Δf"]
+    C --> D["Mag / phase + unwrap"]
+    D --> E["Spike fix"]
+    E --> F["Optional average"]
+    F --> G["Mild filter on R, I"]
+    G --> H["Hamming copy"]
+    H --> I["Week 3: IFFT + matched ref / clutter / α"]
+    I --> J["Ready for Module 3 + export"]
 ```
 
-Used for `.mat` and non-`.s2p` Touchstone loads. Runs on a `QThread` with progress callbacks.
+### Module 2 router
+
+```mermaid
+flowchart LR
+    IN["MicrowaveDataset"] --> R{".s2p?"}
+    R -->|Yes| S21["touchstone_s21 + week3"]
+    R -->|No| GEN["filter → cal → norm → artifacts"]
+    S21 --> OUT["PreprocessingResult"]
+    GEN --> OUT
+    OUT --> EXP["handover_export"]
+```
+
+More diagrams (Week 3 detail, MATLAB path, handoff): see earlier README history / canvas tabs.
 
 ---
 
-## 7. Module 2 brief compliance checklist
+## Module notes
 
-Status vs `Module_2_Signal_Preprocessing_Bullets_for_UG_Students.pdf` and Week 1–2 of `Signal Preprocessing_21082026.pdf`.
+### 1 — Data Acquisition
 
-| Status | Meaning |
-|--------|---------|
-| Done | Implemented and wired for `.s2p` |
-| Partial | Present but incomplete vs brief |
-| Missing | Not implemented on the S21 track |
+- Entry: `data_loader/loader.py` → `MicrowaveDataset`
+- MATLAB legacy + HDF5 v7.3; Touchstone via `scikit-rf`
+- BMID: scan picker (tumor / healthy)
 
-| # | Requirement | Status | Code |
-|---|-------------|--------|------|
-| 1 | Input valid `.s2p`; extract **S21 only** | Done | `load_touchstone_s21_trace()` |
-| 2 | Read header: freq unit, format (DB/MA/RI), Z₀, f start/stop, N | Done | `parse_touchstone_header()` → `TouchstoneHeaderInfo` |
-| 3 | Convert all frequencies to **Hz** | Done | `_FREQUENCY_UNIT_SCALE` in `touchstone_loader.py` |
-| 4–6 | Convert DB/MA/RI → complex linear (keep mag + phase) | Done | `load_touchstone_s21_trace()` |
-| 7 | Average / subtract / filter on **complex** S21 (never dB) | Done | `touchstone_s21.py` averaging, subtraction, filters |
-| 8 | Equal length: frequency vector ↔ S21 | Done | `_validate_frequency_and_s21_lengths()` |
-| 9 | Reject NaN / Inf / empty / non-numeric / duplicate freqs | Done | `_validate_numeric_content()`, `_sort_and_validate_unique_frequencies()` |
-| 10 | Sort ascending; compute Δf | Done | sort + `delta_f_hz` on result |
-| 11 | If non-uniform, interpolate **real & imag** onto uniform grid | Done | `_interpolate_complex_trace()` |
-| 12 | Plot raw \|S21\| dB, wrapped phase, real, imag **before** preprocess | Partial | Arrays computed (`raw_magnitude_db`, phases, complex S21); GUI shows general Mag/phase comparison, not a dedicated raw Real/Imag/phase panel set |
-| 13 | Phase via `atan2(I, R)` | Done | `np.arctan2` in `process_touchstone_s21_dataset()` |
-| 14–16 | Unwrap (±180° rule); keep wrapped **and** unwrapped | Done | `_unwrap_phase_degrees()`; fields on `TouchstoneS21ProcessingResult` |
-| 17 | Isolated spike fix (Hampel / median / local) | Partial | `_correct_isolated_samples()` / `_hampel_mask()` — Hampel path works; `median`/`local` method names still share the Hampel detector |
-| 18 | Complex average of **repeated** same-condition sweeps | Done | `_complex_average()` + GUI “Select Repeated .s2p Files” |
-| 19–20 | Complex reference subtraction when freqs match; else skip + report | Done | `_complex_reference_subtraction()` + notes on `TouchstoneS21ValidationReport` |
-| 21–22 | Mild filters (MA, Gaussian, median, Savitzky–Golay); same settings on R and I | Done | `filtering.apply_noise_filter()` (also offers Butterworth / none) |
-| 23 | Avoid / flag excessive smoothing | Partial | `distortion_ratio` + note if > 0.75; not the brief’s named **NRMSE** metric |
-| 24–25 | Hamming-windowed **copy**; keep unwindowed filtered S21 | Done | `windowed_s21 = filtered * np.hamming(N)`; both retained |
-| 26 | Optional `S21 / max\|S21\|`; keep original scale | Done | `_normalized_copy()`; `generate_normalized_copy` on config |
-| 27 | Final validation (finite, equal lengths, not over-distorted) | Done | re-validate + report notes |
-| 28 | Validation report (filter, corrections, averaging, ref subtract) | Done | `TouchstoneS21ValidationReport.to_display_dict()` → GUI summary |
-| 29 | Handoff: cleaned complex S21(f) + Hamming S21(f) + uniform f | Partial | Filtered S21 → `processed_dataset`; Hamming / phases in `metadata["module2_s21"]` — Module 3 currently reconstructs from `s_parameters` (filtered), not the Hamming copy by default |
+### 2 — Preprocessing
 
-### Work-plan Week 3 items (time-domain Module 2 → Module 3)
+| Track | When | Code |
+|-------|------|------|
+| S21 UG | `.s2p` | `preprocessing/touchstone_s21.py`, `week3_time_domain.py` |
+| General | `.mat` / other | `preprocessing_pipeline.py` stages |
+| Handoff | After run | `handover_export.py` + GUI **Export Module 3 Handoff** |
 
-From `Signal Preprocessing_21082026.pdf` steps 10–16:
+GUI presets:
 
-| Requirement | Status | Notes |
-|-------------|--------|-------|
-| Window target & reference **identically** before subtract | Partial | Code subtracts in frequency **before** Hamming; brief bullets subtract then filter/window. Work plan prefers matched Hamming → IFFT → subtract |
-| IFFT + time vector inside Module 2 | Missing on S21 track | `reconstruction/ifft.py` used in Module 3 |
-| Time-domain matched reference subtraction | Missing | Freq-domain ref subtract only |
-| Group-mean channel clutter removal | Missing on S21 track | General SVD/hybrid exists for multi-trace MATLAB path |
-| One **global** normalize across channels | Partial | Single-trace `max\|S21\|`; multi-channel global α not implemented |
-| Export `.mat` / CSV with Tx/Rx coordinates + full parameter report | Missing | Results stay in memory / GUI; no geometry export yet |
+- **BMID pass-through** — all cleaning `none` / Week 3 off  
+- **`.s2p` brief defaults** — mild Savitzky–Golay + Week 3 on  
 
-Cited method support in the work plan: Blanco-Angulo et al. (Biosensors 2022); Hammouch et al. (Multimedia Tools Appl. 2025).
+Checklist vs the UG PDFs: all Module 2 brief items are **Done** (Week 1–3).  
+Module 3 still defaults to **filtered `S21(f)`** in the GUI; Hamming / time-domain are in metadata and the handoff file.
+
+### 3 — Reconstruction
+
+- Beamformers: DAS, DMAS, DMAS-D4  
+- Auto Tweak, ROI modes, BMID geometry (18 cm, 355° arc, phase-delay option)  
+- Session reports auto-saved under `results/`
 
 ---
 
-## 8. Module 3 — Reconstruction (current)
+## Errors
 
-- Frequency → time: `reconstruction/ifft.py`
-- Beamformers: DAS, DMAS, DMAS-D4 (`reconstruction/`)
-- Manager: circular array with **angle offset / CW / axis flip / 355° BMID arc**, optional **phase-delay radius** (UM-BMID)
-- Quality pick: `quality/beamformer_selector.py` — modes: quality score, prefer DMAS-D4, closest to tumor GT, force DAS/DMAS/DMAS-D4
-- ROI: `roi/roi_detector.py` — peak score or prefer off-center (suppresses origin ring clutter)
-- Auto Tweak: `reconstruction/auto_calibrate.py` — DAS coarse geometry sweep + full beamformer refine; GUI button applies best settings to manual controls
-- GUI: `gui/reconstruction_page.py`
+All framework errors subclass `MicrowaveFrameworkError` (`utils/exceptions.py`). Invalid files show in the Status Log and a dialog; the app should not crash.
 
 ---
 
-## 9. Error Handling
+## Documentation
 
-All framework errors derive from `MicrowaveFrameworkError` (`utils/exceptions.py`):
-
-| Exception | Raised when |
-|---|---|
-| `UnsupportedFileFormatError` | Extension not `.mat/.s1p/.s2p/.s4p/.s8p` (or non-`.s2p` for S21 extract) |
-| `CorruptedFileError` | File cannot be parsed |
-| `MissingVariableError` | No frequency / S-parameter array in `.mat` |
-| `EmptyDatasetError` | Zero-length usable data |
-| `InvalidFrequencyError` | NaN/Inf/negative/non-uniform after process |
-| `InvalidSParameterError` | Shape / NaN/Inf / length mismatch |
-| `DatasetValidationError` | Aggregated validation failure |
-
-Errors show in the Status Log and a `QMessageBox`; the app should not crash on invalid input.
+| Doc | Contents |
+|-----|----------|
+| [`docs/PROJECT_PROGRESS.md`](docs/PROJECT_PROGRESS.md) | What we built (Modules 1–3, BMID vs `.s2p`, UI, next steps) |
+| [`docs/BMID_DEVELOPMENT_STEPS.md`](docs/BMID_DEVELOPMENT_STEPS.md) | BMID integration + experiment log |
+| [`docs/canvases/module1-module2-flowchart.canvas.tsx`](docs/canvases/module1-module2-flowchart.canvas.tsx) | Interactive flowchart |
 
 ---
 
-## 10. Known gaps / next work
+## Next work
 
-1. Dedicated pre-process plots for raw Real / Imag / wrapped / unwrapped phase (data already available).
-2. Use Hamming-windowed S21 as the default Module 3 input when present.
-3. Implement Week 3 S21 path: IFFT, time-domain ref subtract, optional channel clutter, `.mat` export with Tx/Rx coords.
-4. Report **NRMSE** by name; distinguish Hampel vs median vs local spike detectors.
-5. Align subtract/window order with the work-plan PDF if that brief is authoritative for grading.
-6. Sweep antenna angle offset / flips on BMID tumor scans until ROI↔GT is consistently &lt;1.5 cm.
+1. Use Hamming / Week 3 time-domain as the default Module 3 reconstruction input when present.  
+2. Continue BMID localization tuning (see BMID development steps).

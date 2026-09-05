@@ -151,7 +151,9 @@ def butterworth_lowpass_filter(
     def _filt(x: np.ndarray) -> np.ndarray:
         return filtfilt(b, a, x)
 
-    logger.info(f"Applying Butterworth low-pass filter (cutoff={cutoff}, order={order})")
+    logger.info(
+        f"Applying Butterworth low-pass filter (cutoff={cutoff}, order={order})"
+    )
     return _apply_along_freq(s_params, _filt)
 
 
@@ -176,7 +178,9 @@ def gaussian_smoothing_filter(s_params: np.ndarray, sigma: float = 1.0) -> np.nd
         return s_params.copy()
 
     logger.info(f"Applying Gaussian smoothing filter (sigma={sigma})")
-    return _apply_along_freq(s_params, lambda x: gaussian_filter1d(x, sigma=sigma, mode="nearest"))
+    return _apply_along_freq(
+        s_params, lambda x: gaussian_filter1d(x, sigma=sigma, mode="nearest")
+    )
 
 
 def median_smoothing_filter(s_params: np.ndarray, kernel_size: int = 5) -> np.ndarray:
@@ -196,7 +200,10 @@ def median_smoothing_filter(s_params: np.ndarray, kernel_size: int = 5) -> np.nd
     kernel_size = max(1, int(kernel_size))
     if kernel_size % 2 == 0:
         kernel_size += 1
-    kernel_size = min(kernel_size, s_params.shape[0] if s_params.shape[0] % 2 == 1 else s_params.shape[0] - 1)
+    kernel_size = min(
+        kernel_size,
+        s_params.shape[0] if s_params.shape[0] % 2 == 1 else s_params.shape[0] - 1,
+    )
     if kernel_size <= 1:
         return s_params.copy()
 
