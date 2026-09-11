@@ -41,7 +41,12 @@ from reconstruction.reconstruction_manager import (
     reconstruct_all,
     reconstruct_high_resolution_roi,
 )
-from roi.roi_detector import ROIResult, detect_roi, roi_centroid_meters
+from roi.roi_detector import (
+    ROIResult,
+    classify_tumor_candidate,
+    detect_roi,
+    roi_centroid_meters,
+)
 from utils.logger import StatusLog, get_logger
 from utils.session_report import ReconstructionSnapshot
 
@@ -575,6 +580,7 @@ class ReconstructionPanel(QWidget):
             gt_distance = float(
                 np.hypot(centroid_m[0] - tumor_xy[0], centroid_m[1] - tumor_xy[1])
             )
+        candidate = classify_tumor_candidate(images[selected_name], roi_result)
 
         self.last_snapshot = ReconstructionSnapshot(
             selected_beamformer=selected_name,
@@ -590,6 +596,18 @@ class ReconstructionPanel(QWidget):
             image_mean=float(np.mean(images[selected_name])),
             selection_mode=beamformer_mode,
             prefer_off_center_roi=prefer_off_center,
+            selected_image=np.asarray(images[selected_name]).copy(),
+            beamformer_images={
+                name: np.asarray(image).copy() for name, image in images.items()
+            },
+            tumor_candidate_result={
+                "is_tumor_candidate": candidate.is_tumor_candidate,
+                "confidence": candidate.confidence,
+                "suspicion_score": candidate.suspicion_score,
+                "threshold": candidate.threshold,
+                "reason": candidate.reason,
+                "features": dict(candidate.features),
+            },
         )
         self.export_report_button.setEnabled(True)
 
@@ -612,7 +630,7 @@ class ReconstructionPanel(QWidget):
         self._plot_refined_image(refinement)
         self._populate_summary(images, selected_name)
         self._populate_metrics(quality_metrics)
-        self._populate_roi(roi_result)
+        self._populate_roi(roi_result, candidate_result=self.last_snapshot.tumor_candidate_result)
         self._populate_refinement(refinement)
         gt_note = ""
         if tumor_xy is not None:
@@ -621,6 +639,10 @@ class ReconstructionPanel(QWidget):
             )
             if gt_distance is not None:
                 gt_note += f" ROI distance={gt_distance * 100:.2f} cm."
+        candidate_note = (
+            f" Candidate={'YES' if candidate.is_tumor_candidate else 'NO'}"
+            f" (conf={candidate.confidence:.2f})."
+        )
         geom_note = (
             f" offset={config.antenna_angle_offset_deg:.0f}°, "
             f"arc={config.antenna_span_deg:.0f}°, "
@@ -629,7 +651,7 @@ class ReconstructionPanel(QWidget):
         )
         self._log(
             f"Reconstruction completed. Selected beamformer: {selected_name}.{geom_note}"
-            f" ROI bbox={roi_result.bounding_box}. Refined grid={refinement.grid_shape[1]}x{refinement.grid_shape[0]}.{gt_note}",
+            f" ROI bbox={roi_result.bounding_box}. Refined grid={refinement.grid_shape[1]}x{refinement.grid_shape[0]}.{gt_note}{candidate_note}",
             "SUCCESS",
         )
         self.content_tabs.setCurrentIndex(0)
@@ -1026,7 +1048,11 @@ class ReconstructionPanel(QWidget):
             )
         self.metrics_table.resizeColumnsToContents()
 
-    def _populate_roi(self, roi_result: ROIResult) -> None:
+    def _populate_roi(
+        self,
+        roi_result: ROIResult,
+        candidate_result: dict[str, object] | None = None,
+    ) -> None:
         x0, y0, x1, y1 = roi_result.bounding_box
         info = {
             "Bounding Box": f"({x0}, {y0}) - ({x1}, {y1})",
@@ -1035,6 +1061,13 @@ class ReconstructionPanel(QWidget):
             "Threshold": f"{roi_result.threshold:.2f}",
             "ROI Score": f"{roi_result.score:.5f}",
         }
+        if candidate_result:
+            is_candidate = bool(candidate_result.get("is_tumor_candidate", False))
+            confidence = float(candidate_result.get("confidence", 0.0) or 0.0)
+            suspicion = float(candidate_result.get("suspicion_score", 0.0) or 0.0)
+            info["Tumor Candidate"] = "Yes" if is_candidate else "No"
+            info["Candidate Confidence"] = f"{confidence:.3f}"
+            info["Suspicion Score"] = f"{suspicion:.3f}"
 
         self.roi_table.setRowCount(len(info))
         for row, (key, value) in enumerate(info.items()):

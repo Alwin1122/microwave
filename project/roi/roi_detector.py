@@ -21,6 +21,18 @@ class ROIResult:
     mode: str = "peak"
 
 
+@dataclass
+class TumorCandidateResult:
+    """Module 8 tumor-candidate decision derived from ROI/image features."""
+
+    is_tumor_candidate: bool
+    confidence: float
+    suspicion_score: float
+    threshold: float
+    reason: str
+    features: dict[str, float]
+
+
 _EPS = 1e-12
 
 
@@ -49,6 +61,12 @@ def _pixel_to_meters(
     else:
         y_m = float(np.interp(cy, [0, ny - 1], [y_span[0], y_span[1]]))
     return x_m, y_m
+
+
+def _touches_edge(box: tuple[int, int, int, int], shape: tuple[int, int]) -> bool:
+    x0, y0, x1, y1 = box
+    h, w = shape
+    return bool(x0 <= 0 or y0 <= 0 or x1 >= w or y1 >= h)
 
 
 def detect_roi(
@@ -153,8 +171,22 @@ def detect_roi(
             continue
         component_values = smoothed[slc][component_mask]
         peak_val = float(np.max(component_values))
-        # Component ranking stays brightness×extent; tight only changes localization.
-        score = float(np.mean(component_values) * peak_val * area)
+        mean_val = float(np.mean(component_values))
+
+        y_slice, x_slice = slc
+        comp_h = max(1, int(y_slice.stop - y_slice.start))
+        comp_w = max(1, int(x_slice.stop - x_slice.start))
+        bbox_area = float(comp_h * comp_w)
+        compactness = float(area / (bbox_area + _EPS))
+        area_ratio = float(area / (ny * nx + _EPS))
+        edge_touch = _touches_edge(
+            (x_slice.start, y_slice.start, x_slice.stop, y_slice.stop), smoothed.shape
+        )
+
+        # Prefer bright compact blobs while penalizing very large / border-touching regions.
+        size_penalty = 1.0 / (1.0 + 10.0 * area_ratio)
+        edge_penalty = 0.65 if edge_touch else 1.0
+        score = float((0.65 * peak_val + 0.35 * mean_val) * compactness * size_penalty * edge_penalty)
 
         ys, xs = np.where(labeled == component_id)
         weights = smoothed[ys, xs]
@@ -191,7 +223,6 @@ def detect_roi(
             full_mask[y0:y1, x0:x1] = True
             best_area = int(np.sum(full_mask))
         else:
-            y_slice, x_slice = slc
             y0 = max(0, y_slice.start - margin)
             y1 = min(smoothed.shape[0], y_slice.stop + margin)
             x0 = max(0, x_slice.start - margin)
@@ -269,3 +300,47 @@ def tumor_likelihood_features(
         "compactness": float(peak / (area + 1.0)),
         "suspicion": suspicion,
     }
+
+
+def classify_tumor_candidate(
+    image: np.ndarray,
+    roi: ROIResult,
+    *,
+    suspicion_threshold: float = 0.45,
+) -> TumorCandidateResult:
+    """Return a binary tumor-candidate decision with a compact explanation."""
+    features = tumor_likelihood_features(image, roi)
+    score = float(features["suspicion"])
+
+    ny, nx = image.shape
+    edge_touch = _touches_edge(roi.bounding_box, (ny, nx))
+    area_ratio = float(roi.area / (ny * nx + _EPS))
+
+    # Penalize edge-heavy / FOV-filling blobs that are usually clutter.
+    penalty = 1.0
+    if edge_touch:
+        penalty *= 0.8
+    if area_ratio > 0.35:
+        penalty *= 0.7
+    confidence = float(np.clip(score * penalty, 0.0, 1.0))
+
+    is_candidate = confidence >= float(suspicion_threshold)
+    if is_candidate:
+        reason = "Off-center compact hotspot pattern is tumor-like."
+    elif edge_touch and area_ratio > 0.35:
+        reason = "Large edge-touching region looks like clutter/background response."
+    else:
+        reason = "Tumor-like evidence is weak in current ROI features."
+
+    out_features = dict(features)
+    out_features["area_ratio"] = area_ratio
+    out_features["edge_touch"] = 1.0 if edge_touch else 0.0
+
+    return TumorCandidateResult(
+        is_tumor_candidate=is_candidate,
+        confidence=confidence,
+        suspicion_score=score,
+        threshold=float(suspicion_threshold),
+        reason=reason,
+        features=out_features,
+    )

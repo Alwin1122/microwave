@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from roi.roi_detector import detect_roi, roi_centroid_meters
+from roi.roi_detector import classify_tumor_candidate, detect_roi, roi_centroid_meters
 
 
 class TestROIDetector(unittest.TestCase):
@@ -62,6 +62,28 @@ class TestROIDetector(unittest.TestCase):
         x_m, y_m = roi_centroid_meters(roi, image.shape, (-0.05, 0.05), (-0.05, 0.05))
         self.assertAlmostEqual(x_m, -0.03, places=2)
         self.assertAlmostEqual(y_m, 0.03, places=2)
+
+    def test_detect_roi_penalizes_large_edge_blob(self):
+        image = np.zeros((64, 64), dtype=float)
+        image[:, :14] = 2.0  # large edge-clutter slab
+        image[22:28, 36:42] = 3.0  # compact brighter target-like blob
+        result = detect_roi(image, threshold_ratio=0.6, min_area=4, margin=1, sigma=0.6)
+        self.assertGreater(result.centroid[0], 30.0)
+        self.assertGreater(result.centroid[1], 18.0)
+
+    def test_classify_tumor_candidate_scores_offcenter_compact_higher(self):
+        tumor_like = np.zeros((64, 64), dtype=float)
+        tumor_like[14:20, 44:50] = 4.0
+        roi_tumor = detect_roi(tumor_like, threshold_ratio=0.6, min_area=4, margin=1, sigma=0.5)
+        cand_tumor = classify_tumor_candidate(tumor_like, roi_tumor)
+
+        clutter_like = np.zeros((64, 64), dtype=float)
+        clutter_like[:50, :36] = 2.0
+        roi_clutter = detect_roi(clutter_like, threshold_ratio=0.6, min_area=4, margin=1, sigma=0.5)
+        cand_clutter = classify_tumor_candidate(clutter_like, roi_clutter)
+
+        self.assertGreater(cand_tumor.confidence, cand_clutter.confidence)
+        self.assertGreater(cand_tumor.suspicion_score, cand_clutter.suspicion_score)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
+import matplotlib
 import numpy as np
+
+from quality.metrics import compute_image_ccr, compute_image_fwhm_pixels
 
 from data_loader.dataset_info import MicrowaveDataset, build_summary
 from preprocessing.preprocessing_pipeline import PreprocessingResult
 from reconstruction.reconstruction_manager import ReconstructionConfig, ROIRefinement
 from roi.roi_detector import ROIResult
+
+matplotlib.use("Agg")
+from matplotlib import pyplot as plt
 
 
 @dataclass
@@ -39,6 +45,9 @@ class ReconstructionSnapshot:
     image_mean: float | None = None
     selection_mode: str | None = None
     prefer_off_center_roi: bool | None = None
+    selected_image: np.ndarray | None = None
+    beamformer_images: dict[str, np.ndarray] | None = None
+    tumor_candidate_result: dict[str, Any] | None = None
 
 
 @dataclass
@@ -148,10 +157,13 @@ def _preprocessing_section(result: PreprocessingResult) -> tuple[str, dict[str, 
         "## 2. Preprocessing",
         "",
         f"- Filter: `{result.config.filter_method}`",
+        f"- Filter parameters: {result.config.filter_kwargs or {}}",
         f"- Calibration: `{result.config.calibration_method}`",
         f"- Normalization: `{result.config.normalization_method}`",
         f"- Artifact method: `{result.config.artifact_method}`",
         f"- Background subtraction enabled: {result.config.do_background_subtraction}",
+        f"- Spike-removal method: `{result.config.spike_detection_method}`",
+        f"- Spike-removal parameters: {result.config.spike_detection_kwargs or {}}",
         f"- Stages recorded: {', '.join(result.stage_outputs.keys()) or 'none'}",
         "",
         "### Signal quality",
@@ -162,10 +174,13 @@ def _preprocessing_section(result: PreprocessingResult) -> tuple[str, dict[str, 
     payload: dict[str, Any] = {
         "config": {
             "filter_method": result.config.filter_method,
+            "filter_kwargs": dict(result.config.filter_kwargs),
             "calibration_method": result.config.calibration_method,
             "normalization_method": result.config.normalization_method,
             "artifact_method": result.config.artifact_method,
             "do_background_subtraction": result.config.do_background_subtraction,
+            "spike_detection_method": result.config.spike_detection_method,
+            "spike_detection_kwargs": dict(result.config.spike_detection_kwargs),
         },
         "quality": q.to_display_dict(),
         "stages": list(result.stage_outputs.keys()),
@@ -176,9 +191,57 @@ def _preprocessing_section(result: PreprocessingResult) -> tuple[str, dict[str, 
         lines.append("### Module 2 validation report")
         for key, value in result.validation_report.to_display_dict().items():
             lines.append(f"- {key}: {value}")
+        if result.validation_report.interpolation_performed:
+            checks.append("OK: interpolation was applied to enforce uniform spacing.")
+        else:
+            checks.append("OK: interpolation not required (input spacing already uniform).")
+        checks.append(
+            f"OK: raw vs filtered comparison tracked via NRMSE={result.validation_report.nrmse:.3f}."
+        )
         payload["validation"] = result.validation_report.to_display_dict()
 
     return "\n".join(lines), payload, checks
+
+
+def _selected_scr(snap: ReconstructionSnapshot) -> float | None:
+    metrics = snap.quality_metrics.get(snap.selected_beamformer, {})
+    value = metrics.get("scr")
+    if value is None:
+        return None
+    return float(value)
+
+
+def _selected_ccr(snap: ReconstructionSnapshot) -> float | None:
+    if snap.selected_image is None:
+        return None
+    return float(compute_image_ccr(np.asarray(snap.selected_image, dtype=float)))
+
+
+def _selected_fwhm_cm(snap: ReconstructionSnapshot) -> float | None:
+    if snap.selected_image is None:
+        return None
+    image = np.asarray(snap.selected_image, dtype=float)
+    if image.ndim != 2:
+        return None
+
+    fwhm_px = compute_image_fwhm_pixels(image)
+    x_span_cm = abs(float(snap.config.x_span[1] - snap.config.x_span[0])) * 100.0
+    y_span_cm = abs(float(snap.config.y_span[1] - snap.config.y_span[0])) * 100.0
+    px_to_cm_x = x_span_cm / max(image.shape[1] - 1, 1)
+    px_to_cm_y = y_span_cm / max(image.shape[0] - 1, 1)
+    px_to_cm = 0.5 * (px_to_cm_x + px_to_cm_y)
+    return float(fwhm_px * px_to_cm)
+
+
+def _localization_validation_row(snap: ReconstructionSnapshot) -> dict[str, Any]:
+    return {
+        "localization_error_cm": None
+        if snap.tumor_gt_distance_m is None
+        else float(snap.tumor_gt_distance_m * 100.0),
+        "scr": _selected_scr(snap),
+        "ccr": _selected_ccr(snap),
+        "fwhm_cm": _selected_fwhm_cm(snap),
+    }
 
 
 def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str, Any], list[str]]:
@@ -264,6 +327,34 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
         ]
     )
 
+    row = _localization_validation_row(snap)
+    lines.extend(
+        [
+            "",
+            "### Localization validation",
+            "| Metric | Value |",
+            "|---|---|",
+            f"| Localization error (cm) | {_fmt(row['localization_error_cm'])} |",
+            f"| SCR | {_fmt(row['scr'])} |",
+            f"| CCR | {_fmt(row['ccr'])} |",
+            f"| FWHM (cm) | {_fmt(row['fwhm_cm'])} |",
+        ]
+    )
+
+    if snap.tumor_candidate_result:
+        candidate = snap.tumor_candidate_result
+        lines.extend(
+            [
+                "",
+                "### Tumor candidate decision",
+                f"- Candidate: {'Yes' if candidate.get('is_tumor_candidate') else 'No'}",
+                f"- Confidence: {_fmt(candidate.get('confidence'))}",
+                f"- Suspicion score: {_fmt(candidate.get('suspicion_score'))}",
+                f"- Threshold: {_fmt(candidate.get('threshold'))}",
+                f"- Reason: {candidate.get('reason', 'N/A')}",
+            ]
+        )
+
     payload = {
         "selected_beamformer": snap.selected_beamformer,
         "source_label": snap.source_label,
@@ -296,6 +387,8 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
         "tumor_gt_distance_m": snap.tumor_gt_distance_m,
         "image_peak": snap.image_peak,
         "image_mean": snap.image_mean,
+        "localization_validation": row,
+        "tumor_candidate_result": snap.tumor_candidate_result,
     }
     return "\n".join(lines), payload, checks
 
@@ -316,6 +409,209 @@ def _next_steps(checks: list[str], ctx: SessionReportContext) -> list[str]:
     if any(c.startswith("FAIL") for c in checks):
         steps.insert(0, "Fix FAIL checks first (data integrity) before algorithm tuning.")
     return steps
+
+
+def _healthy_tumor_validation_status(ctx: SessionReportContext) -> tuple[str, dict[str, Any]]:
+    dataset = ctx.dataset or (ctx.preprocessing.processed_dataset if ctx.preprocessing else None)
+    if dataset is None:
+        return (
+            "- Status: Not evaluated (no dataset loaded).",
+            {"status": "not-evaluated", "reason": "no-dataset"},
+        )
+
+    meta = dataset.metadata or {}
+    has_tumor = meta.get("bmid_has_tumor")
+    if has_tumor is None:
+        return (
+            "- Status: Single-case run only (healthy/tumour labels not available in this dataset).",
+            {"status": "single-case", "labeled_case": False},
+        )
+
+    case_label = "tumour" if bool(has_tumor) else "healthy"
+    return (
+        "\n".join(
+            [
+                f"- Current case: {case_label}",
+                "- Healthy + tumour pair validation: pending in this report unless both case runs are aggregated.",
+            ]
+        ),
+        {
+            "status": "single-labeled-case",
+            "current_case": case_label,
+            "pair_validation": "pending-aggregate",
+        },
+    )
+
+
+def _save_magnitude_plot(
+    ctx: SessionReportContext, output_dir: str, file_stub: str
+) -> str | None:
+    if ctx.preprocessing is None:
+        return None
+
+    p = ctx.preprocessing
+    figure_path = os.path.join(output_dir, f"{file_stub}_s21_magnitude_compare.png")
+
+    if p.touchstone_s21_result is not None:
+        freqs = np.asarray(p.touchstone_s21_result.uniform_frequencies_hz, dtype=float)
+        raw = np.asarray(p.touchstone_s21_result.raw_s21, dtype=complex)
+        filtered = np.asarray(p.touchstone_s21_result.filtered_s21, dtype=complex)
+    else:
+        freqs = np.asarray(p.original_dataset.frequencies, dtype=float)
+        raw = np.asarray(p.original_dataset.s_parameters, dtype=complex).reshape(freqs.shape[0], -1)[:, 0]
+        filtered = (
+            np.asarray(p.processed_dataset.s_parameters, dtype=complex)
+            .reshape(freqs.shape[0], -1)[:, 0]
+        )
+
+    mag_raw_db = 20.0 * np.log10(np.abs(raw) + 1e-12)
+    mag_filtered_db = 20.0 * np.log10(np.abs(filtered) + 1e-12)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5), tight_layout=True)
+    ax.plot(freqs / 1e9, mag_raw_db, label="Raw |S21| (dB)", linewidth=1.3)
+    ax.plot(freqs / 1e9, mag_filtered_db, label="Preprocessed |S21| (dB)", linewidth=1.3)
+    ax.set_title("S21 Magnitude: Raw vs Preprocessed")
+    ax.set_xlabel("Frequency (GHz)")
+    ax.set_ylabel("Magnitude (dB)")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+    fig.savefig(figure_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return figure_path
+
+
+def _save_phase_plot(
+    ctx: SessionReportContext, output_dir: str, file_stub: str
+) -> str | None:
+    if ctx.preprocessing is None or ctx.preprocessing.touchstone_s21_result is None:
+        return None
+
+    s21 = ctx.preprocessing.touchstone_s21_result
+    freqs = np.asarray(s21.uniform_frequencies_hz, dtype=float)
+    figure_path = os.path.join(output_dir, f"{file_stub}_phase_wrapped_unwrapped.png")
+
+    fig, ax = plt.subplots(figsize=(8, 4.5), tight_layout=True)
+    ax.plot(freqs / 1e9, s21.wrapped_phase_deg, label="Wrapped phase (deg)", linewidth=1.2)
+    ax.plot(freqs / 1e9, s21.unwrapped_phase_deg, label="Unwrapped phase (deg)", linewidth=1.2)
+    ax.set_title("S21 Phase: Wrapped vs Unwrapped")
+    ax.set_xlabel("Frequency (GHz)")
+    ax.set_ylabel("Phase (deg)")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+    fig.savefig(figure_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return figure_path
+
+
+def _save_time_domain_plot(
+    ctx: SessionReportContext, output_dir: str, file_stub: str
+) -> str | None:
+    if ctx.preprocessing is None or ctx.preprocessing.week3_result is None:
+        return None
+
+    week3 = ctx.preprocessing.week3_result
+    figure_path = os.path.join(output_dir, f"{file_stub}_ifft_time_domain.png")
+    time_ns = np.asarray(week3.time_s, dtype=float) * 1e9
+
+    time_hamming = np.asarray(week3.time_hamming)
+    if time_hamming.ndim == 2:
+        trace = np.abs(time_hamming[:, 0])
+    else:
+        trace = np.abs(time_hamming)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5), tight_layout=True)
+    ax.plot(time_ns, trace, label="|IFFT(S21_hamming)|", linewidth=1.3)
+
+    if week3.time_reference_subtracted is not None:
+        ref_sub = np.asarray(week3.time_reference_subtracted)
+        ref_trace = np.abs(ref_sub[:, 0]) if ref_sub.ndim == 2 else np.abs(ref_sub)
+        ax.plot(time_ns, ref_trace, label="|Time reference subtracted|", linewidth=1.2)
+
+    ax.set_title("IFFT Time-Domain Signal")
+    ax.set_xlabel("Time (ns)")
+    ax.set_ylabel("Magnitude (a.u.)")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+    fig.savefig(figure_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return figure_path
+
+
+def _save_same_scale_beamformer_plot(
+    ctx: SessionReportContext, output_dir: str, file_stub: str
+) -> str | None:
+    if ctx.reconstruction is None or not ctx.reconstruction.beamformer_images:
+        return None
+
+    images = ctx.reconstruction.beamformer_images
+    required = ["DAS", "DMAS", "DMAS-D4"]
+    if any(name not in images for name in required):
+        return None
+
+    figure_path = os.path.join(output_dir, f"{file_stub}_beamformers_same_scale.png")
+    cfg = ctx.reconstruction.config
+    extent = [
+        cfg.x_span[0] * 100.0,
+        cfg.x_span[1] * 100.0,
+        cfg.y_span[0] * 100.0,
+        cfg.y_span[1] * 100.0,
+    ]
+    all_vals = np.concatenate([np.asarray(images[name], dtype=float).ravel() for name in required])
+    vmin = float(np.percentile(all_vals, 5))
+    vmax = float(np.percentile(all_vals, 99))
+    if vmax <= vmin:
+        vmin = float(np.min(all_vals))
+        vmax = float(np.max(all_vals) + 1e-12)
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4), tight_layout=True)
+    for ax, name in zip(axes, required):
+        image = np.asarray(images[name], dtype=float)
+        im = ax.imshow(
+            image,
+            cmap="inferno",
+            origin="lower",
+            aspect="equal",
+            extent=extent,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        ax.set_title(name)
+        ax.set_xlabel("x (cm)")
+        ax.set_ylabel("y (cm)")
+
+        if ctx.reconstruction.roi_centroid_m is not None:
+            ax.plot(
+                ctx.reconstruction.roi_centroid_m[0] * 100.0,
+                ctx.reconstruction.roi_centroid_m[1] * 100.0,
+                "wo",
+                markersize=4,
+            )
+        if ctx.reconstruction.tumor_xy_m is not None:
+            ax.plot(
+                ctx.reconstruction.tumor_xy_m[0] * 100.0,
+                ctx.reconstruction.tumor_xy_m[1] * 100.0,
+                marker="x",
+                markersize=8,
+                markeredgewidth=1.8,
+                color="lime",
+            )
+
+    fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.030, pad=0.03)
+    fig.savefig(figure_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return figure_path
+
+
+def _generate_validation_figures(
+    ctx: SessionReportContext, output_dir: str, file_stub: str
+) -> list[str]:
+    generated = [
+        _save_magnitude_plot(ctx, output_dir, file_stub),
+        _save_phase_plot(ctx, output_dir, file_stub),
+        _save_time_domain_plot(ctx, output_dir, file_stub),
+        _save_same_scale_beamformer_plot(ctx, output_dir, file_stub),
+    ]
+    return [path for path in generated if path and os.path.isfile(path)]
 
 
 def build_session_report(ctx: SessionReportContext) -> tuple[str, dict[str, Any]]:
@@ -368,8 +664,12 @@ def build_session_report(ctx: SessionReportContext) -> tuple[str, dict[str, Any]
     for idx, step in enumerate(steps, start=1):
         sections.append(f"{idx}. {step}")
 
+    validation_lines, validation_payload = _healthy_tumor_validation_status(ctx)
+    sections.extend(["", "## 6. Healthy vs tumour validation", "", validation_lines])
+    payload["healthy_tumour_validation"] = validation_payload
+
     if ctx.notes:
-        sections.extend(["", "## 6. Notes", ""])
+        sections.extend(["", "## 7. Notes", ""])
         for note in ctx.notes:
             sections.append(f"- {note}")
 
@@ -395,12 +695,27 @@ def write_session_report(
     file_stub = basename or f"session_report_{stamp}"
     markdown, payload = build_session_report(ctx)
 
-    if figure_paths:
-        payload["figures"] = [os.path.basename(path) for path in figure_paths if path]
+    generated_validation_figures = _generate_validation_figures(ctx, output_dir, file_stub)
+    all_figures = list(figure_paths or []) + generated_validation_figures
+    dedup_figures: list[str] = []
+    seen: set[str] = set()
+    for path in all_figures:
+        if not path:
+            continue
+        normalized = os.path.normpath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        dedup_figures.append(path)
+
+    if dedup_figures:
+        payload["figures"] = [os.path.basename(path) for path in dedup_figures if path]
         markdown += "\n## Figures\n\n"
-        for path in figure_paths:
+        for path in dedup_figures:
             if path and os.path.isfile(path):
-                markdown += f"- `{os.path.basename(path)}`\n"
+                figure_name = os.path.basename(path)
+                markdown += f"### {figure_name}\n\n"
+                markdown += f"![{figure_name}]({figure_name})\n\n"
 
     md_path = os.path.join(output_dir, f"{file_stub}.md")
     json_path = os.path.join(output_dir, f"{file_stub}.json")
