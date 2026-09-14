@@ -25,6 +25,8 @@ Description:
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import shutil
 from datetime import datetime
 
 import numpy as np
@@ -805,7 +807,9 @@ class MainWindow(QMainWindow):
             self._on_reconstruction_completed
         )
         self._tabs = tabs
-        self._results_dir = os.path.join(os.getcwd(), "results")
+        self._results_dir = str(
+            (Path(__file__).resolve().parent.parent / "results")
+        )
         self._latest_report_paths: dict[str, str] = {}
 
     def _on_dataset_loaded(self, dataset: MicrowaveDataset) -> None:
@@ -900,18 +904,12 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Ensure latest files exist / are fresh before offering a copy.
+        # Always generate into the project results/ folder first (reliable on Windows),
+        # then optionally copy the artifacts to a user-chosen folder.
         self._autosave_session_report(reason="manual-export")
 
-        default_dir = self._results_dir
-        os.makedirs(default_dir, exist_ok=True)
-        target_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Choose folder to copy the final report",
-            default_dir,
-        )
-        if not target_dir:
-            return
+        results_dir = Path(self._results_dir).expanduser().resolve()
+        results_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -919,25 +917,67 @@ class MainWindow(QMainWindow):
             figure_paths: list[str] = []
             if ctx.reconstruction is not None:
                 figure_paths = self.reconstruction_panel.save_figures(
-                    target_dir, file_stem
+                    str(results_dir), file_stem
                 )
             paths = write_session_report(
                 ctx,
-                output_dir=target_dir,
+                output_dir=str(results_dir),
                 basename=file_stem,
                 figure_paths=figure_paths,
             )
-            message = (
-                f"Report copied:\n\n"
-                f"Markdown: {paths['markdown']}\n"
-                f"JSON: {paths['json']}\n\n"
-                f"Also always auto-updated at:\n"
-                f"{os.path.join(self._results_dir, 'latest_session_report.md')}"
+            self._latest_report_paths = paths
+
+            generated = [paths["markdown"], paths["json"], *figure_paths]
+            # Include same-scale / validation figures written next to the report.
+            for extra in results_dir.glob(f"{file_stem}_*.png"):
+                extra_s = str(extra)
+                if extra_s not in generated:
+                    generated.append(extra_s)
+
+            target_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Optional: choose a folder to copy the report (Cancel keeps it in results/)",
+                str(results_dir),
             )
-            if figure_paths:
-                message += "\nFigures:\n- " + "\n- ".join(figure_paths)
+
+            copied: list[str] = []
+            copy_note = ""
+            if target_dir:
+                dest_root = Path(target_dir).expanduser().resolve()
+                try:
+                    dest_root.mkdir(parents=True, exist_ok=True)
+                    for src in generated:
+                        src_path = Path(src)
+                        if not src_path.is_file():
+                            continue
+                        dest = dest_root / src_path.name
+                        shutil.copy2(src_path, dest)
+                        copied.append(str(dest))
+                    copy_note = f"\n\nCopied to:\n{dest_root}"
+                except OSError as copy_exc:
+                    logger.exception("Copy to chosen folder failed")
+                    copy_note = (
+                        f"\n\nCould not copy to:\n{dest_root}\n"
+                        f"Reason: {copy_exc}\n"
+                        "Report is still available under results/."
+                    )
+
+            message = (
+                f"Report saved under results/:\n\n"
+                f"Markdown: {paths['markdown']}\n"
+                f"JSON: {paths['json']}"
+                f"{copy_note}"
+            )
+            if copied:
+                message += "\nFiles:\n- " + "\n- ".join(Path(p).name for p in copied)
+            elif figure_paths:
+                message += "\nFigures:\n- " + "\n- ".join(Path(p).name for p in figure_paths)
             QMessageBox.information(self, "Final Report Saved", message)
             logger.info("Session report written to %s", paths["markdown"])
         except Exception as exc:
             logger.exception("Failed to write session report")
-            QMessageBox.critical(self, "Report Export Failed", str(exc))
+            QMessageBox.critical(
+                self,
+                "Report Export Failed",
+                f"{exc}\n\nTip: reports are written to:\n{results_dir}",
+            )

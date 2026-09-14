@@ -98,22 +98,25 @@ Pending improvement:
 - Tune decision threshold using healthy-vs-tumor batch validation once full paired BMID data is available locally.
 
 ### Module 9 - Tumor Characterization
-Status: In progress
+Status: Completed (core)
 
 Work done:
-- Basic region measurements and reconstruction-derived indicators are available.
+- Quantitative ROI descriptors are computed in physical units (cm): centroid, radial offset, equivalent diameter, bbox size, area, aspect ratio, compactness, and eccentricity proxy.
+- Intensity descriptors include ROI peak/mean, peak-to-mean, local SCR, and FWHM.
+- Characterization is shown in the reconstruction Details panel and included in session reports.
 
 Pending improvement:
-- More complete characterization outputs are required for robust quantitative tumor descriptors.
+- Calibrate size estimates against BMID tumor-radius metadata across a larger scan subset.
 
 ### Module 10 - Reconstruction Confidence Assessment
-Status: In progress
+Status: Completed (core)
 
 Work done:
-- Individual quality indicators are already calculated.
+- Unified 0?1 reconstruction confidence score combines image quality, tumor-candidate detection, beamformer margin, localization evidence, and focus sharpness.
+- Confidence label (low/medium/high), component breakdown, and short reasons are exposed in GUI Details and session reports.
 
 Pending improvement:
-- Unified confidence scoring needs to be finalized and calibrated for stable interpretation.
+- Recalibrate component weights using healthy-vs-tumor batch validation once paired BMID runs are aggregated.
 
 ### Module 11 - Visualization Dashboard
 Status: Completed (core)
@@ -152,7 +155,7 @@ Pending improvement:
 
 ## Next immediate focus
 
-1. Finalize confidence scoring and characterization outputs.
+1. Calibrate Module 9?10 thresholds on a larger healthy-vs-tumor BMID subset.
 2. Improve ROI compactness and reduce edge/clutter artifacts.
 3. Strengthen tumor detection stability across healthy and tumor datasets.
 4. Prepare a polished final report template for guide submission.

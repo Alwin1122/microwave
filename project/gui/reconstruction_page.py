@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import os
 
 import numpy as np
@@ -41,7 +43,10 @@ from reconstruction.reconstruction_manager import (
     reconstruct_all,
     reconstruct_high_resolution_roi,
 )
+from quality.characterization import characterize_tumor_region
+from quality.confidence import assess_reconstruction_confidence
 from roi.roi_detector import (
+
     ROIResult,
     classify_tumor_candidate,
     detect_roi,
@@ -581,6 +586,29 @@ class ReconstructionPanel(QWidget):
                 np.hypot(centroid_m[0] - tumor_xy[0], centroid_m[1] - tumor_xy[1])
             )
         candidate = classify_tumor_candidate(images[selected_name], roi_result)
+        characterization = characterize_tumor_region(
+            images[selected_name],
+            roi_result,
+            x_span=config.x_span,
+            y_span=config.y_span,
+            centroid_m=centroid_m,
+        )
+        candidate_payload = {
+            "is_tumor_candidate": candidate.is_tumor_candidate,
+            "confidence": candidate.confidence,
+            "suspicion_score": candidate.suspicion_score,
+            "threshold": candidate.threshold,
+            "reason": candidate.reason,
+            "features": dict(candidate.features),
+        }
+        confidence = assess_reconstruction_confidence(
+            selected_quality=quality_metrics.get(selected_name),
+            all_quality_metrics=quality_metrics,
+            selected_beamformer=selected_name,
+            tumor_candidate=candidate_payload,
+            characterization=characterization.to_dict(),
+            tumor_gt_distance_m=gt_distance,
+        )
 
         self.last_snapshot = ReconstructionSnapshot(
             selected_beamformer=selected_name,
@@ -600,14 +628,9 @@ class ReconstructionPanel(QWidget):
             beamformer_images={
                 name: np.asarray(image).copy() for name, image in images.items()
             },
-            tumor_candidate_result={
-                "is_tumor_candidate": candidate.is_tumor_candidate,
-                "confidence": candidate.confidence,
-                "suspicion_score": candidate.suspicion_score,
-                "threshold": candidate.threshold,
-                "reason": candidate.reason,
-                "features": dict(candidate.features),
-            },
+            tumor_candidate_result=candidate_payload,
+            tumor_characterization=characterization.to_dict(),
+            reconstruction_confidence=confidence.to_dict(),
         )
         self.export_report_button.setEnabled(True)
 
@@ -630,7 +653,12 @@ class ReconstructionPanel(QWidget):
         self._plot_refined_image(refinement)
         self._populate_summary(images, selected_name)
         self._populate_metrics(quality_metrics)
-        self._populate_roi(roi_result, candidate_result=self.last_snapshot.tumor_candidate_result)
+        self._populate_roi(
+            roi_result,
+            candidate_result=self.last_snapshot.tumor_candidate_result,
+            characterization=self.last_snapshot.tumor_characterization,
+            confidence=self.last_snapshot.reconstruction_confidence,
+        )
         self._populate_refinement(refinement)
         gt_note = ""
         if tumor_xy is not None:
@@ -642,6 +670,8 @@ class ReconstructionPanel(QWidget):
         candidate_note = (
             f" Candidate={'YES' if candidate.is_tumor_candidate else 'NO'}"
             f" (conf={candidate.confidence:.2f})."
+            f" Overall confidence={confidence.overall:.2f} ({confidence.label})."
+            f" Diam={characterization.equivalent_diameter_cm:.2f} cm."
         )
         geom_note = (
             f" offset={config.antenna_angle_offset_deg:.0f}°, "
@@ -669,15 +699,17 @@ class ReconstructionPanel(QWidget):
 
     def save_figures(self, output_dir: str, basename: str) -> list[str]:
         """Save current reconstruction figures as PNGs; return written paths."""
-        os.makedirs(output_dir, exist_ok=True)
+        out = Path(output_dir).expanduser().resolve()
+        out.mkdir(parents=True, exist_ok=True)
         paths: list[str] = []
-        selected_path = os.path.join(output_dir, f"{basename}_selected.png")
-        compare_path = os.path.join(output_dir, f"{basename}_beamformers.png")
-        refined_path = os.path.join(output_dir, f"{basename}_roi_refine.png")
-        self.selected_figure.savefig(selected_path, dpi=140, bbox_inches="tight")
-        self.figure.savefig(compare_path, dpi=140, bbox_inches="tight")
-        self.refined_figure.savefig(refined_path, dpi=140, bbox_inches="tight")
-        paths.extend([selected_path, compare_path, refined_path])
+        for suffix, figure in (
+            ("selected", self.selected_figure),
+            ("beamformers", self.figure),
+            ("roi_refine", self.refined_figure),
+        ):
+            target = out / f"{basename}_{suffix}.png"
+            figure.savefig(str(target), dpi=140, bbox_inches="tight")
+            paths.append(str(target))
         return paths
 
     def _apply_dataset_defaults(self, dataset: MicrowaveDataset) -> None:
@@ -1052,22 +1084,46 @@ class ReconstructionPanel(QWidget):
         self,
         roi_result: ROIResult,
         candidate_result: dict[str, object] | None = None,
+        characterization: dict[str, float] | None = None,
+        confidence: dict[str, object] | None = None,
     ) -> None:
         x0, y0, x1, y1 = roi_result.bounding_box
         info = {
             "Bounding Box": f"({x0}, {y0}) - ({x1}, {y1})",
-            "Centroid": f"({roi_result.centroid[0]:.2f}, {roi_result.centroid[1]:.2f})",
-            "Area": str(roi_result.area),
+            "Centroid (px)": f"({roi_result.centroid[0]:.1f}, {roi_result.centroid[1]:.1f})",
+            "Area (px)": str(roi_result.area),
             "Threshold": f"{roi_result.threshold:.2f}",
             "ROI Score": f"{roi_result.score:.5f}",
         }
         if candidate_result:
             is_candidate = bool(candidate_result.get("is_tumor_candidate", False))
-            confidence = float(candidate_result.get("confidence", 0.0) or 0.0)
+            cand_conf = float(candidate_result.get("confidence", 0.0) or 0.0)
             suspicion = float(candidate_result.get("suspicion_score", 0.0) or 0.0)
             info["Tumor Candidate"] = "Yes" if is_candidate else "No"
-            info["Candidate Confidence"] = f"{confidence:.3f}"
+            info["Candidate Confidence"] = f"{cand_conf:.3f}"
             info["Suspicion Score"] = f"{suspicion:.3f}"
+        if characterization:
+            info["Centroid (cm)"] = (
+                f"({characterization.get('centroid_x_cm', 0.0):.2f}, "
+                f"{characterization.get('centroid_y_cm', 0.0):.2f})"
+            )
+            info["Eq. Diameter (cm)"] = f"{characterization.get('equivalent_diameter_cm', 0.0):.2f}"
+            info["BBox (cm)"] = (
+                f"{characterization.get('bbox_width_cm', 0.0):.2f} x "
+                f"{characterization.get('bbox_height_cm', 0.0):.2f}"
+            )
+            info["Area (cm2)"] = f"{characterization.get('area_cm2', 0.0):.3f}"
+            info["FWHM (cm)"] = f"{characterization.get('fwhm_cm', 0.0):.2f}"
+            info["Compactness"] = f"{characterization.get('compactness', 0.0):.3f}"
+            info["Local SCR"] = f"{characterization.get('local_scr', 0.0):.3f}"
+        if confidence:
+            overall = float(confidence.get("overall", 0.0) or 0.0)
+            label = str(confidence.get("label", "n/a"))
+            info["Overall Confidence"] = f"{overall:.3f} ({label})"
+            components = confidence.get("components") or {}
+            if isinstance(components, dict):
+                info["Conf: Detection"] = f"{float(components.get('detection', 0.0) or 0.0):.3f}"
+                info["Conf: Localization"] = f"{float(components.get('localization', 0.0) or 0.0):.3f}"
 
         self.roi_table.setRowCount(len(info))
         for row, (key, value) in enumerate(info.items()):

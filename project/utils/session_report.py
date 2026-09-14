@@ -48,6 +48,8 @@ class ReconstructionSnapshot:
     selected_image: np.ndarray | None = None
     beamformer_images: dict[str, np.ndarray] | None = None
     tumor_candidate_result: dict[str, Any] | None = None
+    tumor_characterization: dict[str, float] | None = None
+    reconstruction_confidence: dict[str, Any] | None = None
 
 
 @dataclass
@@ -355,6 +357,58 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
             ]
         )
 
+    if snap.tumor_characterization:
+        char = snap.tumor_characterization
+        lines.extend(
+            [
+                "",
+                "### Tumor characterization (Module 9)",
+                f"- Centroid: ({_fmt(char.get('centroid_x_cm'))}, {_fmt(char.get('centroid_y_cm'))}) cm",
+                f"- Radial offset: {_fmt(char.get('radial_offset_cm'))} cm",
+                f"- Equivalent diameter: {_fmt(char.get('equivalent_diameter_cm'))} cm",
+                f"- Bounding box: {_fmt(char.get('bbox_width_cm'))} x {_fmt(char.get('bbox_height_cm'))} cm",
+                f"- Aspect ratio: {_fmt(char.get('aspect_ratio'))}",
+                f"- Area: {_fmt(char.get('area_cm2'))} cm?",
+                f"- Peak / mean intensity: {_fmt(char.get('peak_intensity'))} / {_fmt(char.get('mean_intensity'))}",
+                f"- Peak-to-mean: {_fmt(char.get('peak_to_mean'))}",
+                f"- Local SCR: {_fmt(char.get('local_scr'))}",
+                f"- FWHM: {_fmt(char.get('fwhm_cm'))} cm",
+                f"- Compactness: {_fmt(char.get('compactness'))}",
+                f"- Eccentricity proxy: {_fmt(char.get('eccentricity_proxy'))}",
+            ]
+        )
+
+    if snap.reconstruction_confidence:
+        conf = snap.reconstruction_confidence
+        components = conf.get("components") or {}
+        reasons = conf.get("reasons") or []
+        lines.extend(
+            [
+                "",
+                "### Reconstruction confidence (Module 10)",
+                f"- Overall: **{_fmt(conf.get('overall'))}** ({conf.get('label', 'N/A')})",
+                f"- Image quality: {_fmt(components.get('image_quality'))}",
+                f"- Detection: {_fmt(components.get('detection'))}",
+                f"- Beamformer margin: {_fmt(components.get('beamformer_margin'))}",
+                f"- Localization: {_fmt(components.get('localization'))}",
+                f"- Focus: {_fmt(components.get('focus'))}",
+            ]
+        )
+        for reason in reasons:
+            lines.append(f"- Note: {reason}")
+        overall = conf.get("overall")
+        try:
+            overall_f = float(overall)
+        except (TypeError, ValueError):
+            overall_f = None
+        if overall_f is not None:
+            if overall_f >= 0.75:
+                checks.append(f"OK: reconstruction confidence is high ({overall_f:.2f}).")
+            elif overall_f >= 0.45:
+                checks.append(f"WARN: reconstruction confidence is medium ({overall_f:.2f}).")
+            else:
+                checks.append(f"WARN: reconstruction confidence is low ({overall_f:.2f}).")
+
     payload = {
         "selected_beamformer": snap.selected_beamformer,
         "source_label": snap.source_label,
@@ -389,6 +443,8 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
         "image_mean": snap.image_mean,
         "localization_validation": row,
         "tumor_candidate_result": snap.tumor_candidate_result,
+        "tumor_characterization": snap.tumor_characterization,
+        "reconstruction_confidence": snap.reconstruction_confidence,
     }
     return "\n".join(lines), payload, checks
 
