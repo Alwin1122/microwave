@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -25,6 +26,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_loader.dataset_info import build_summary
+from data_loader.bmid_loader import resolve_measurement_from_metadata_path
 from data_loader.loader import load_dataset
 from data_loader.matlab_loader import load_matlab_dataset
 from data_loader.physical_metadata import extract_physical_metadata_from_text
@@ -244,6 +246,39 @@ class TestMatlabLoader(unittest.TestCase):
             self.assertAlmostEqual(dataset.metadata["antenna_radius_m"], 0.18, places=6)
         finally:
             os.remove(path)
+
+    def test_known_dataset_fallback_fd_data_simple_clean(self):
+        """simple-clean style files can store only `fd_data` with no explicit frequency vector."""
+        from scipy.io import savemat
+
+        path = os.path.join(DATASETS_DIR, "_test_simple_clean_fd_data.mat")
+        data = np.random.randn(1001, 12) + 1j * np.random.randn(1001, 12)
+        savemat(path, {"fd_data": data})
+        try:
+            dataset = load_matlab_dataset(path)
+            self.assertEqual(dataset.n_frequencies, 1001)
+            np.testing.assert_allclose(dataset.freq_range_hz, (1e9, 9e9))
+            self.assertEqual(dataset.s_parameters.shape, (1001, 12))
+        finally:
+            os.remove(path)
+
+    def test_resolve_measurement_from_metadata_md_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md_path = os.path.join(tmp, "md_list_s21_adi.mat")
+            fd_path = os.path.join(tmp, "fd_data_s21_adi.mat")
+            open(md_path, "wb").close()
+            open(fd_path, "wb").close()
+            resolved = resolve_measurement_from_metadata_path(md_path)
+            self.assertEqual(os.path.abspath(resolved), os.path.abspath(fd_path))
+
+    def test_resolve_measurement_from_metadata_generic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md_path = os.path.join(tmp, "metadata_gen_one.mat")
+            fd_path = os.path.join(tmp, "fd_data_gen_one_s11.mat")
+            open(md_path, "wb").close()
+            open(fd_path, "wb").close()
+            resolved = resolve_measurement_from_metadata_path(md_path)
+            self.assertEqual(os.path.abspath(resolved), os.path.abspath(fd_path))
 
 
 class TestTouchstoneLoader(unittest.TestCase):

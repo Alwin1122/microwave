@@ -63,6 +63,8 @@ _SPARAM_NAME_HINTS = ("s_param", "sparam", "s11", "s21", "s_matrix", "smat", "s_
 _KNOWN_DATASET_FREQUENCY_SWEEPS = {
     "fd_data_s11": (1e9, 8e9, 1001),
     "fd_data_s21": (1e9, 8e9, 1001),
+    # Some simple-clean exports use just 'fd_data' and span 1-9 GHz.
+    "fd_data": (1e9, 9e9, 1001),
 }
 
 
