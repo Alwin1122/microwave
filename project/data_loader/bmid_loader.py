@@ -28,6 +28,17 @@ BMID_N_FREQ = 1001
 
 _FD_NAME_RE = re.compile(r"^fd_data_(s11|s21)(?:_(adi|emp))?$", re.IGNORECASE)
 _FD_FILE_RE = re.compile(r"fd_data_(s11|s21)(?:_(adi|emp))?\.mat$", re.IGNORECASE)
+_MD_LIST_FILE_RE = re.compile(r"md_list_(s11|s21)(?:_(adi|emp))?\.mat$", re.IGNORECASE)
+_GENERIC_MD_FILE_RE = re.compile(r"metadata_(.+)\.mat$", re.IGNORECASE)
+
+_SEARCH_SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "results",
+    "node_modules",
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +82,80 @@ def companion_metadata_path(fd_file_path: str) -> str | None:
     name = f"md_list_{sparam}_{cal}.mat" if cal else f"md_list_{sparam}.mat"
     candidate = os.path.join(os.path.dirname(fd_file_path), name)
     return candidate if os.path.isfile(candidate) else None
+
+
+def is_likely_metadata_file(file_path: str) -> bool:
+    """Return True when a selected MAT filename looks metadata-only."""
+    base = os.path.basename(file_path)
+    lowered = base.lower()
+    return bool(
+        _MD_LIST_FILE_RE.search(base)
+        or _GENERIC_MD_FILE_RE.search(base)
+        or lowered.startswith("md_list_")
+        or lowered.startswith("metadata_")
+    )
+
+
+def _candidate_measurement_names_from_metadata(md_file_path: str) -> list[str]:
+    base = os.path.basename(md_file_path)
+    candidates: list[str] = []
+
+    md_list_match = _MD_LIST_FILE_RE.search(base)
+    if md_list_match:
+        candidates.append("fd_data_" + base[len("md_list_") :])
+
+    generic_match = _GENERIC_MD_FILE_RE.search(base)
+    if generic_match:
+        suffix = generic_match.group(1)
+        # Prefer S21 when both exist; fallback to S11.
+        candidates.extend(
+            [
+                f"fd_data_{suffix}_s21.mat",
+                f"fd_data_{suffix}_s11.mat",
+                f"fd_data_{suffix}.mat",
+            ]
+        )
+
+    return list(dict.fromkeys(candidates))
+
+
+def _search_for_candidate_in_repo(start_path: str, candidate_names: list[str]) -> str | None:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    names_set = {name.lower() for name in candidate_names}
+
+    # Prioritize siblings near the selected metadata file first.
+    near_roots = [os.path.dirname(start_path), os.path.dirname(os.path.dirname(start_path))]
+    for root in near_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for name in candidate_names:
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                return path
+
+    for walk_root, dir_names, file_names in os.walk(repo_root):
+        dir_names[:] = [d for d in dir_names if d not in _SEARCH_SKIP_DIRS]
+        lower_map = {f.lower(): f for f in file_names}
+        for wanted in names_set:
+            if wanted in lower_map:
+                return os.path.join(walk_root, lower_map[wanted])
+    return None
+
+
+def resolve_measurement_from_metadata_path(md_file_path: str) -> str | None:
+    """Resolve a metadata-only MAT path to a likely paired measurement MAT file."""
+    if not is_likely_metadata_file(md_file_path):
+        return None
+    candidates = _candidate_measurement_names_from_metadata(md_file_path)
+    if not candidates:
+        return None
+
+    for name in candidates:
+        path = os.path.join(os.path.dirname(md_file_path), name)
+        if os.path.isfile(path):
+            return path
+
+    return _search_for_candidate_in_repo(md_file_path, candidates)
 
 
 def _safe_float(value) -> float | None:

@@ -43,6 +43,24 @@ Outputs: `results/latest_guide_progress_report.md`, `results/latest_beginner_exp
 
 Sample files: `python datasets/generate_sample_data.py`
 
+### Automated intake and verification
+
+Run one command to discover candidate datasets, classify metadata vs measurement,
+verify load/preprocess/reconstruct sanity, and generate upload recommendations:
+
+```bash
+cd project
+python tools/auto_intake_agent.py --max-files 80
+```
+
+Outputs:
+
+- `results/auto_intake_report.json`
+- `results/auto_intake_report.md`
+
+Use this before manual GUI upload to avoid metadata-only files without paired
+measurement data and to spot corrupted inputs early.
+
 ### BMID demo (already-clean cube)
 
 1. Place `fd_data_s21_adi.mat` + `md_list_s21_adi.mat` in `datasets/` (large cubes are gitignored).  

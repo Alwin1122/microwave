@@ -46,7 +46,14 @@ from PySide6.QtWidgets import (
 )
 
 from automation.service import AutoValidationService
-from data_loader.bmid_loader import BmidScanInfo, is_bmid_fd_filename, list_bmid_scans
+from data_loader.bmid_loader import (
+    BmidScanInfo,
+    ScanSelectionRequiredError,
+    is_bmid_fd_filename,
+    is_likely_metadata_file,
+    list_bmid_scans,
+    resolve_measurement_from_metadata_path,
+)
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.loader import load_dataset_with_summary
 from gui.styles import set_page_title, set_primary_button
@@ -261,6 +268,20 @@ class UploadPage(QWidget):
     def load_dataset_from_path(
         self, file_path: str, scan_index: int | None = None
     ) -> None:
+        if scan_index is None and is_likely_metadata_file(file_path):
+            resolved = resolve_measurement_from_metadata_path(file_path)
+            if resolved is not None and os.path.abspath(resolved) != os.path.abspath(file_path):
+                self._log(
+                    "Selected metadata-only file; automatically loading paired measurement: "
+                    f"{resolved}"
+                )
+                file_path = resolved
+            else:
+                self._log(
+                    "Selected file appears metadata-only and no paired fd_data file was found automatically.",
+                    "WARN",
+                )
+
         self._log(f"Loading file: {file_path}")
         try:
             if is_bmid_fd_filename(file_path) and scan_index is None:
@@ -277,6 +298,25 @@ class UploadPage(QWidget):
             dataset, summary = load_dataset_with_summary(
                 file_path, scan_index=scan_index
             )
+        except ScanSelectionRequiredError as exc:
+            # Some UM-BMID cubes use generic names (e.g. fd_data_gen_*),
+            # so prompt here when the loader detects multi-scan content.
+            try:
+                scans = list_bmid_scans(file_path)
+            except Exception:
+                self._log(f"Failed to load dataset: {exc}", "ERROR")
+                QMessageBox.critical(self, "Dataset Load Error", str(exc))
+                return
+
+            dialog = BmidScanPickerDialog(scans, self)
+            if dialog.exec() != QDialog.Accepted or dialog.selected_index is None:
+                self._log("BMID scan selection cancelled.")
+                return
+
+            chosen = dialog.selected_index
+            self._log(f"Selected BMID scan index {chosen}: {scans[chosen].label}")
+            self.load_dataset_from_path(file_path, scan_index=chosen)
+            return
         except MicrowaveFrameworkError as exc:
             self._log(f"Failed to load dataset: {exc}", "ERROR")
             QMessageBox.critical(self, "Dataset Load Error", str(exc))
