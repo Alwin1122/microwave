@@ -36,6 +36,13 @@ project/datasets/fd_data_*.mat
 # Session report archives (regenerated locally; docs describe how)
 project/results/session_report_*
 project/results/latest_session_report*
+project/results/latest_guide_progress_report.md
+project/results/latest_beginner_explainer.md
+project/results/latest_auto_validation.json
+project/results/guide_progress_report_*
+project/results/beginner_explainer_*
+project/results/auto_validation_*
+project/results/.auto_validation_cache/
 project/session_report_*
 project/results/*_module3_handoff.*
 project/results/*_handoff.*

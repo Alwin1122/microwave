@@ -29,6 +29,18 @@ python main.py
 python -m unittest discover -s tests -v
 ```
 
+### Auto Validation (one-click / CLI / MCP)
+
+Batch-discover datasets, run quality gates (`strict` / `balanced` / `lenient`), and write dual reports:
+
+```bash
+python tools/run_auto_validation.py --roots datasets --profile balanced --max-files 5
+```
+
+In the GUI: **Acquisition → Run Auto Validation**.  
+Docs: `docs/AUTO_VALIDATION.md`  
+Outputs: `results/latest_guide_progress_report.md`, `results/latest_beginner_explainer.md`
+
 Sample files: `python datasets/generate_sample_data.py`
 
 ### BMID demo (already-clean cube)

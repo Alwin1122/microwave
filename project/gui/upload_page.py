@@ -24,8 +24,10 @@ Description:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -43,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from automation.service import AutoValidationService
 from data_loader.bmid_loader import BmidScanInfo, is_bmid_fd_filename, list_bmid_scans
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.loader import load_dataset_with_summary
@@ -58,6 +61,45 @@ SUPPORTED_FILE_FILTER = (
     "Touchstone Files (*.s1p *.s2p *.s4p *.s8p);;"
     "All Files (*)"
 )
+
+
+class AutoValidationWorker(QThread):
+    """Background runner for one-click auto validation (no UI freeze)."""
+
+    progress_updated = Signal(int, str)
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        roots: list[str],
+        *,
+        max_files: int = 8,
+        threshold_profile: str = "balanced",
+        include_reconstruction_checks: bool = True,
+        output_dir: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.roots = roots
+        self.max_files = max_files
+        self.threshold_profile = threshold_profile
+        self.include_reconstruction_checks = include_reconstruction_checks
+        self.output_dir = output_dir
+
+    def run(self) -> None:
+        try:
+            service = AutoValidationService(output_dir=self.output_dir)
+            batch = service.run(
+                self.roots,
+                max_files=self.max_files,
+                threshold_profile=self.threshold_profile,
+                include_reconstruction_checks=self.include_reconstruction_checks,
+                progress=lambda pct, msg: self.progress_updated.emit(pct, msg),
+            )
+            self.finished_ok.emit(batch)
+        except Exception as exc:  # pragma: no cover - defensive GUI path
+            logger.exception("Auto validation worker failed")
+            self.failed.emit(str(exc))
 
 
 class BmidScanPickerDialog(QDialog):
@@ -134,6 +176,8 @@ class UploadPage(QWidget):
         super().__init__(parent)
         self.status_log = StatusLog()
         self.current_dataset: MicrowaveDataset | None = None
+        self._auto_worker: AutoValidationWorker | None = None
+        self._results_dir = str(Path(__file__).resolve().parent.parent / "results")
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -146,7 +190,10 @@ class UploadPage(QWidget):
         title = QLabel()
         set_page_title(title, "Data Acquisition")
         title_col.addWidget(title)
-        subtitle = QLabel("Load MATLAB (.mat) or Touchstone (.sNp). BMID cubes open a scan picker.")
+        subtitle = QLabel(
+            "Load MATLAB (.mat) or Touchstone (.sNp). BMID cubes open a scan picker. "
+            "Use Run Auto Validation for batch quality checks + dual reports."
+        )
         subtitle.setObjectName("hintLabel")
         subtitle.setWordWrap(True)
         title_col.addWidget(subtitle)
@@ -156,6 +203,14 @@ class UploadPage(QWidget):
         set_primary_button(self.load_button)
         self.load_button.clicked.connect(self.on_load_dataset_clicked)
         header.addWidget(self.load_button)
+
+        self.auto_validate_button = QPushButton("Run Auto Validation")
+        self.auto_validate_button.setToolTip(
+            "Discover datasets, run load/preprocess/reconstruction checks, "
+            "classify pass/warn/fail, and write guide + beginner reports."
+        )
+        self.auto_validate_button.clicked.connect(self.on_run_auto_validation_clicked)
+        header.addWidget(self.auto_validate_button)
         layout.addLayout(header)
 
         self.file_label = QLabel("No file loaded.")
@@ -262,3 +317,65 @@ class UploadPage(QWidget):
             self.info_table.setItem(row, 0, QTableWidgetItem(str(key)))
             self.info_table.setItem(row, 1, QTableWidgetItem(str(value)))
         self.info_table.resizeColumnsToContents()
+
+    def on_run_auto_validation_clicked(self) -> None:
+        if self._auto_worker is not None and self._auto_worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Auto Validation Running",
+                "Validation is already in progress. Watch the log panel for updates.",
+            )
+            return
+
+        datasets_dir = Path(__file__).resolve().parent.parent / "datasets"
+        roots = [str(datasets_dir)] if datasets_dir.is_dir() else [os.getcwd()]
+        self._log(
+            f"Starting auto validation under: {roots[0]} (profile=balanced)",
+            "INFO",
+        )
+        self.auto_validate_button.setEnabled(False)
+        self.load_button.setEnabled(False)
+        self._auto_worker = AutoValidationWorker(
+            roots,
+            max_files=8,
+            threshold_profile="balanced",
+            include_reconstruction_checks=True,
+            output_dir=self._results_dir,
+        )
+        self._auto_worker.progress_updated.connect(self._on_auto_progress)
+        self._auto_worker.finished_ok.connect(self._on_auto_finished)
+        self._auto_worker.failed.connect(self._on_auto_failed)
+        self._auto_worker.start()
+
+    def _on_auto_progress(self, percent: int, message: str) -> None:
+        self._log(f"[Auto {percent}%] {message}")
+
+    def _on_auto_failed(self, message: str) -> None:
+        self.auto_validate_button.setEnabled(True)
+        self.load_button.setEnabled(True)
+        self._log(f"Auto validation failed: {message}", "ERROR")
+        QMessageBox.critical(
+            self,
+            "Auto Validation Failed",
+            f"{message}\n\nExisting load/preprocess/reconstruct workflows are unchanged.",
+        )
+
+    def _on_auto_finished(self, batch) -> None:
+        self.auto_validate_button.setEnabled(True)
+        self.load_button.setEnabled(True)
+        self._log(batch.message, "SUCCESS")
+        guide = batch.report_paths.get("guide")
+        beginner = batch.report_paths.get("beginner")
+        recommended = [r for r in batch.results if r.recommended_upload]
+        summary = (
+            f"{batch.message}\n\n"
+            f"Recommended uploads: {len(recommended)}\n"
+            f"Guide report:\n{guide}\n\n"
+            f"Beginner report:\n{beginner}"
+        )
+        QMessageBox.information(self, "Auto Validation Complete", summary)
+        if guide and os.path.isfile(guide):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(guide))
+        elif beginner and os.path.isfile(beginner):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(beginner))
+
