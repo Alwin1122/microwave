@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from quality.metrics import compute_quality_metrics
-from roi.roi_detector import detect_roi, roi_centroid_meters
+from roi.roi_detector import detect_rois, roi_centroid_meters
 
 
 def _normalize(value: float, min_val: float, max_val: float) -> float:
@@ -59,12 +59,30 @@ def select_best_beamformer(
         )
         metrics[name]["score"] = float(score_map[name])
         metrics[name]["time"] = float(timings.get(name, 0.0))
+        metrics[name]["selected"] = 0.0
+        metrics[name]["selection_reason"] = ""
+
+    def _finish(selected: str, mode_name: str, reason: str):
+        for name in metrics:
+            metrics[name]["selection_mode"] = mode_name
+            metrics[name]["selected"] = 1.0 if name == selected else 0.0
+            metrics[name]["selection_reason"] = reason if name == selected else "not selected"
+        return selected, metrics
 
     mode = (mode or "quality").strip().lower()
     if mode in {"prefer_dmas_d4", "dmas_d4", "dmas-d4"} and "DMAS-D4" in images:
-        selected = "DMAS-D4"
-        metrics[selected]["selection_mode"] = "prefer_dmas_d4"
-        return selected, metrics
+        winner = score_map and max(score_map, key=score_map.get)
+        extra = (
+            f" Quality winner would be {winner} ({score_map[winner]:.3f})."
+            if winner and winner != "DMAS-D4"
+            else ""
+        )
+        return _finish(
+            "DMAS-D4",
+            "prefer_dmas_d4",
+            "Prefer DMAS-D4 mode: DMAS-D4 is chosen even if another score is higher."
+            + extra,
+        )
 
     force_map = {
         "force_das": "DAS",
@@ -75,32 +93,54 @@ def select_best_beamformer(
         "force_dmas-d4": "DMAS-D4",
     }
     if mode in force_map and force_map[mode] in images:
-        selected = force_map[mode]
-        metrics[selected]["selection_mode"] = mode
-        return selected, metrics
+        chosen = force_map[mode]
+        return _finish(
+            chosen,
+            mode,
+            f"Forced by user setting ({mode}). Scores are reported but not used to pick.",
+        )
 
     if mode in {"tumor_gt", "gt", "closest_to_tumor"} and tumor_xy_m is not None and x_span and y_span:
         best_name = None
         best_dist = float("inf")
         for name, image in images.items():
-            roi = detect_roi(
+            rois = detect_rois(
                 image,
                 prefer_off_center=prefer_off_center,
                 tight_peak=tight_peak,
                 x_span=x_span,
                 y_span=y_span,
-                prior_xy_m=None,
+                prior_xy_m=tumor_xy_m,
+                prior_weight=0.0,
+                max_rois=4,
             )
-            centroid_m = roi_centroid_meters(roi, image.shape, x_span, y_span)
-            dist = float(np.hypot(centroid_m[0] - tumor_xy_m[0], centroid_m[1] - tumor_xy_m[1]))
+            dists = []
+            for roi in rois:
+                centroid_m = roi_centroid_meters(roi, image.shape, x_span, y_span)
+                dists.append(
+                    float(np.hypot(centroid_m[0] - tumor_xy_m[0], centroid_m[1] - tumor_xy_m[1]))
+                )
+            dist = min(dists) if dists else float("inf")
             metrics[name]["tumor_gt_distance_m"] = dist
             if dist < best_dist:
                 best_dist = dist
                 best_name = name
         if best_name is not None:
-            metrics[best_name]["selection_mode"] = "tumor_gt"
-            return best_name, metrics
+            return _finish(
+                best_name,
+                "tumor_gt",
+                f"Closest ROI to tumor GT ({best_dist * 100:.2f} cm). "
+                "Quality scores are shown for comparison, not used as the pick rule.",
+            )
 
     selected = max(score_map, key=score_map.get)
-    metrics[selected]["selection_mode"] = "quality"
-    return selected, metrics
+    return _finish(
+        selected,
+        "quality",
+        (
+            f"Highest weighted score {score_map[selected]:.3f} "
+            f"(SNR {weights['snr']:.2f}, SCR {weights['scr']:.2f}, "
+            f"contrast {weights['contrast']:.2f}, time {weights['time']:.2f}; "
+            "each metric min-max normalized across DAS/DMAS/DMAS-D4)."
+        ),
+    )

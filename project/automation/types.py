@@ -72,6 +72,7 @@ class ValidationBatchResult:
     report_paths: dict[str, str] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     message: str = ""
+    tumor_index: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,4 +82,5 @@ class ValidationBatchResult:
             "report_paths": dict(self.report_paths),
             "counts": dict(self.counts),
             "message": self.message,
+            "tumor_index": list(self.tumor_index or []),
         }

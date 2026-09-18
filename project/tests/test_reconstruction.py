@@ -5,10 +5,14 @@ from __future__ import annotations
 import numpy as np
 import unittest
 
-from reconstruction.ifft import frequency_to_time
-from reconstruction.das import das_reconstruct
-from reconstruction.dmas import dmas_reconstruct
-from reconstruction.dmas_d4 import dmas_d4_reconstruct
+from reconstruction.ifft import frequency_to_time, time_axis_seconds
+from reconstruction.das import DEFAULT_DAS_COHERENCE_GAMMA, das_reconstruct
+from reconstruction.dmas import (
+    DEFAULT_DMAS_COHERENCE_GAMMA,
+    DEFAULT_DMAS_PAIR_EXPONENT,
+    dmas_reconstruct,
+)
+from reconstruction.dmas_d4 import DEFAULT_DMAS_D4_EXPONENT, dmas_d4_reconstruct
 from reconstruction.reconstruction_manager import (
     ROIRefinement,
     bmid_phase_delayed_radius,
@@ -57,6 +61,13 @@ class TestIFFT(unittest.TestCase):
         self.assertEqual(t.shape, (8, 2))
         self.assertTrue(np.isclose(np.abs(t[0, 0]), 1.0))
         self.assertTrue(np.allclose(t[1:, 0], 0.0, atol=1e-8))
+
+    def test_time_axis_length_matches_ifft(self):
+        freqs, data = _make_synthetic_frequency_data()
+        t = frequency_to_time(data, freqs)
+        axis = time_axis_seconds(freqs, t.shape[0])
+        self.assertEqual(axis.shape[0], t.shape[0])
+        self.assertGreater(axis[-1], 0.0)
 
 
 class TestBeamforming(unittest.TestCase):
@@ -135,6 +146,41 @@ class TestBeamforming(unittest.TestCase):
         peak_xy = (float(grid_x[peak_x]), float(grid_y[peak_y]))
         error = float(np.linalg.norm(np.asarray(peak_xy) - np.asarray(target_xy)))
         self.assertLess(error, 0.01)
+
+    def test_bmid_tuned_constants_differ_from_textbook(self):
+        self.assertAlmostEqual(DEFAULT_DAS_COHERENCE_GAMMA, 0.75)
+        self.assertAlmostEqual(DEFAULT_DMAS_PAIR_EXPONENT, 0.55)
+        self.assertAlmostEqual(DEFAULT_DMAS_COHERENCE_GAMMA, 0.6)
+        self.assertAlmostEqual(DEFAULT_DMAS_D4_EXPONENT, 0.55)
+        from reconstruction.reconstruction_manager import ReconstructionConfig
+
+        cfg = ReconstructionConfig()
+        self.assertAlmostEqual(cfg.das_coherence_gamma, DEFAULT_DAS_COHERENCE_GAMMA)
+        self.assertAlmostEqual(cfg.dmas_d4_exponent, DEFAULT_DMAS_D4_EXPONENT)
+
+    def test_tuned_das_and_d4_differ_from_textbook(self):
+        textbook_das = das_reconstruct(
+            self.time_data,
+            self.freqs,
+            self.ant_pos,
+            self.grid_x,
+            self.grid_y,
+            coherence_gamma=0.0,
+        )
+        tuned_das = das_reconstruct(self.time_data, self.freqs, self.ant_pos, self.grid_x, self.grid_y)
+        self.assertFalse(np.allclose(textbook_das, tuned_das))
+        textbook_d4 = dmas_d4_reconstruct(
+            self.time_data,
+            self.freqs,
+            self.ant_pos,
+            self.grid_x,
+            self.grid_y,
+            pair_exponent=0.5,
+            coherence_gamma=0.0,
+            d4_exponent=0.25,
+        )
+        tuned_d4 = dmas_d4_reconstruct(self.time_data, self.freqs, self.ant_pos, self.grid_x, self.grid_y)
+        self.assertFalse(np.allclose(textbook_d4, tuned_d4))
 
 
 class TestReconstructionConfig(unittest.TestCase):

@@ -10,7 +10,7 @@ from automation.discovery import discover_files
 from automation.pipeline import validate_one_target
 from automation.policy import get_threshold_profile
 from automation.reports import write_automation_reports
-from automation.resolver import resolve_measurement_targets
+from automation.resolver import build_tumor_index, resolve_measurement_targets
 from automation.types import (
     DatasetValidationResult,
     DatasetVerdict,
@@ -20,6 +20,25 @@ from automation.types import (
 )
 
 ProgressCb = Callable[[int, str], None]
+
+
+def umbmid_root() -> Path | None:
+    """Real UM-BMID simple-clean cubes (not the tiny project/datasets samples)."""
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    path = repo_root / "umbmid" / "simple-clean"
+    return path if path.is_dir() else None
+
+
+def default_validation_roots() -> list[str]:
+    """Use only UM-BMID cubes when they are present."""
+    umbmid = umbmid_root()
+    if umbmid is not None:
+        return [str(umbmid)]
+    project_root = Path(__file__).resolve().parent.parent
+    datasets = project_root / "datasets"
+    if datasets.is_dir():
+        return [str(datasets)]
+    return [str(project_root)]
 
 
 class AutoValidationService:
@@ -35,15 +54,17 @@ class AutoValidationService:
         self,
         roots: list[str],
         *,
-        max_files: int = 20,
+        max_files: int = 1,
         threshold_profile: str = "balanced",
         include_reconstruction_checks: bool = True,
-        bmid_strategy: str = "first_tumor_else_first",
-        max_bmid_scans: int = 1,
+        bmid_strategy: str = "diverse",
+        max_bmid_scans: int = 8,
         use_cache: bool = True,
         progress: ProgressCb | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> ValidationBatchResult:
         profile = get_threshold_profile(threshold_profile)
+        figure_dir = self.output_dir / "auto_cases"
         if progress:
             progress(2, f"Discovering files under {len(roots)} root(s)…")
         files = discover_files(roots, max_files=max_files)
@@ -52,6 +73,10 @@ class AutoValidationService:
         targets = resolve_measurement_targets(
             files, bmid_strategy=bmid_strategy, max_bmid_scans=max_bmid_scans
         )
+        tumor_index = build_tumor_index(
+            [item.path for item in files if item.kind.value == "measurement"]
+            + [t.measurement_path for t in targets]
+        )
         if not targets:
             batch = ValidationBatchResult(
                 profile=profile.name,
@@ -59,6 +84,7 @@ class AutoValidationService:
                 results=[],
                 counts={"pass": 0, "warning": 0, "fail": 0, "blocked": 0},
                 message="No measurement targets resolved from the provided roots.",
+                tumor_index=tumor_index,
             )
             paths = write_automation_reports(batch, self.output_dir)
             batch.report_paths = paths
@@ -66,6 +92,18 @@ class AutoValidationService:
 
         results: list[DatasetValidationResult] = []
         for idx, target in enumerate(targets):
+            if should_stop and should_stop():
+                batch = _batch_from_results(
+                    profile.name, roots, results, tumor_index, in_progress=False
+                )
+                batch.message = (
+                    f"Cancelled after {len(results)} of {len(targets)} target(s)."
+                )
+                if progress:
+                    progress(100, batch.message)
+                paths = write_automation_reports(batch, self.output_dir)
+                batch.report_paths = paths
+                return batch
             pct = 10 + int(80 * idx / max(len(targets), 1))
             label = Path(target.measurement_path).name
             if progress:
@@ -79,17 +117,22 @@ class AutoValidationService:
                     profile.name,
                     include_reconstruction_checks,
                 )
+            cached_ok = False
             if cached_payload and "payload" in cached_payload:
                 result = _result_from_dict(cached_payload["payload"])
-                result.cached = True
-                results.append(result)
-                continue
+                figures = (result.details or {}).get("figures") or {}
+                cached_ok = bool(figures) and all(Path(p).is_file() for p in figures.values())
+                if cached_ok:
+                    result.cached = True
+                    results.append(result)
+                    continue
 
             result = validate_one_target(
                 target,
                 profile=profile,
                 include_reconstruction_checks=include_reconstruction_checks,
                 progress=(lambda msg: progress(pct, msg)) if progress else None,
+                figure_dir=str(figure_dir) if include_reconstruction_checks else None,
             )
             if use_cache and result.status != DatasetVerdict.BLOCKED:
                 self.cache.set(
@@ -100,26 +143,15 @@ class AutoValidationService:
                     result.to_dict(),
                 )
             results.append(result)
+            if (idx + 1) % 5 == 0 or idx + 1 == len(targets):
+                interim = _batch_from_results(
+                    profile.name, roots, results, tumor_index, in_progress=idx + 1 < len(targets)
+                )
+                write_automation_reports(interim, self.output_dir)
 
-        counts = {
-            "pass": sum(1 for r in results if r.status == DatasetVerdict.PASS),
-            "warning": sum(1 for r in results if r.status == DatasetVerdict.WARNING),
-            "fail": sum(1 for r in results if r.status == DatasetVerdict.FAIL),
-            "blocked": sum(1 for r in results if r.status == DatasetVerdict.BLOCKED),
-        }
-        batch = ValidationBatchResult(
-            profile=profile.name,
-            roots=list(roots),
-            results=results,
-            counts=counts,
-            message=(
-                f"Validated {len(results)} target(s): "
-                f"{counts['pass']} pass, {counts['warning']} warning, "
-                f"{counts['fail']} fail, {counts['blocked']} blocked."
-            ),
-        )
+        batch = _batch_from_results(profile.name, roots, results, tumor_index)
         if progress:
-            progress(92, "Writing guide + beginner reports…")
+            progress(92, "Writing auto analysis report…")
         paths = write_automation_reports(batch, self.output_dir)
         batch.report_paths = paths
         if progress:
@@ -128,8 +160,7 @@ class AutoValidationService:
 
     def get_latest_report_paths(self) -> dict[str, str]:
         mapping = {
-            "guide": self.output_dir / "latest_guide_progress_report.md",
-            "beginner": self.output_dir / "latest_beginner_explainer.md",
+            "analysis": self.output_dir / "latest_auto_analysis.md",
             "json": self.output_dir / "latest_auto_validation.json",
         }
         return {k: str(v) for k, v in mapping.items() if v.is_file()}
@@ -181,14 +212,51 @@ class AutoValidationService:
         return {"found": False, "message": "Dataset not present in latest auto-validation results."}
 
 
+def _batch_from_results(
+    profile_name: str,
+    roots: list[str],
+    results: list[DatasetValidationResult],
+    tumor_index: list[dict],
+    *,
+    in_progress: bool = False,
+) -> ValidationBatchResult:
+    n_yes = sum(
+        1
+        for r in results
+        if ((r.details or {}).get("tumor_candidate") or {}).get("is_tumor_candidate")
+    )
+    counts = {
+        "pass": sum(1 for r in results if r.status == DatasetVerdict.PASS),
+        "warning": sum(1 for r in results if r.status == DatasetVerdict.WARNING),
+        "fail": sum(1 for r in results if r.status == DatasetVerdict.FAIL),
+        "blocked": sum(1 for r in results if r.status == DatasetVerdict.BLOCKED),
+    }
+    prefix = "In progress — " if in_progress else ""
+    return ValidationBatchResult(
+        profile=profile_name,
+        roots=list(roots),
+        results=results,
+        counts=counts,
+        message=(
+            f"{prefix}Validated {len(results)} target(s): "
+            f"{counts['pass']} pass, {counts['warning']} warning, "
+            f"{counts['fail']} fail, {counts['blocked']} blocked; "
+            f"{n_yes} tumor-candidate Yes."
+        ),
+        tumor_index=tumor_index,
+    )
+
+
 def run_auto_validation(
     roots: list[str],
     *,
-    max_files: int = 20,
+    max_files: int = 1,
     threshold_profile: str = "balanced",
     include_reconstruction_checks: bool = True,
     progress: ProgressCb | None = None,
     output_dir: str | None = None,
+    bmid_strategy: str = "diverse",
+    max_bmid_scans: int = 8,
 ) -> ValidationBatchResult:
     service = AutoValidationService(output_dir=output_dir)
     return service.run(
@@ -196,6 +264,8 @@ def run_auto_validation(
         max_files=max_files,
         threshold_profile=threshold_profile,
         include_reconstruction_checks=include_reconstruction_checks,
+        bmid_strategy=bmid_strategy,
+        max_bmid_scans=max_bmid_scans,
         progress=progress,
     )
 

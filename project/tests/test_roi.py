@@ -84,6 +84,140 @@ class TestROIDetector(unittest.TestCase):
 
         self.assertGreater(cand_tumor.confidence, cand_clutter.confidence)
         self.assertGreater(cand_tumor.suspicion_score, cand_clutter.suspicion_score)
+        self.assertTrue(cand_tumor.is_tumor_candidate)
+
+    def test_uniform_ring_peak_is_not_a_candidate(self):
+        yy, xx = np.ogrid[:64, :64]
+        radius = np.hypot(xx - 31.5, yy - 31.5)
+        image = np.exp(-((radius - 18.0) ** 2) / (2.0 * 2.5**2))
+        roi = detect_roi(image, threshold_ratio=0.55, min_area=4, margin=1, sigma=0.4, tight_peak=True)
+        cand = classify_tumor_candidate(image, roi)
+        self.assertFalse(cand.is_tumor_candidate)
+
+    def test_focal_excess_on_ring_can_still_be_candidate(self):
+        yy, xx = np.ogrid[:64, :64]
+        radius = np.hypot(xx - 31.5, yy - 31.5)
+        image = np.exp(-((radius - 18.0) ** 2) / (2.0 * 2.5**2))
+        image[12:16, 40:44] += 4.0
+        roi = detect_roi(image, threshold_ratio=0.5, min_area=4, margin=1, sigma=0.3, tight_peak=True)
+        cand = classify_tumor_candidate(image, roi)
+        self.assertTrue(cand.is_tumor_candidate)
+
+    def test_near_center_compact_hotspot_is_candidate(self):
+        image = np.zeros((64, 64), dtype=float)
+        image[28:36, 30:38] = 5.0
+        roi = detect_roi(image, threshold_ratio=0.6, min_area=4, margin=1, sigma=0.4, tight_peak=True)
+        cand = classify_tumor_candidate(image, roi, gt_distance_cm=1.0)
+        self.assertTrue(cand.is_tumor_candidate)
+        self.assertGreaterEqual(cand.confidence, 0.45)
+
+    def test_detect_rois_keeps_two_separated_hotspots(self):
+        from roi.roi_detector import detect_rois, evaluate_rois
+
+        image = np.zeros((64, 64), dtype=float)
+        image[12:18, 10:16] = 5.0
+        image[44:50, 46:52] = 4.5
+        rois = detect_rois(image, threshold_ratio=0.6, min_area=4, margin=1, sigma=0.4, max_rois=4)
+        self.assertGreaterEqual(len(rois), 2)
+        xs = sorted(item.centroid[0] for item in rois[:2])
+        self.assertLess(xs[0], 25.0)
+        self.assertGreater(xs[1], 35.0)
+        evaluated = evaluate_rois(
+            image,
+            rois,
+            x_span=(-0.05, 0.05),
+            y_span=(-0.05, 0.05),
+            tumor_xy_m=(-0.03, -0.03),
+        )
+        self.assertGreaterEqual(evaluated.combined.features["n_rois"], 2.0)
+        self.assertLess(evaluated.localization_roi.centroid[0], 25.0)
+
+    def test_gt_near_one_spot_does_not_hide_the_other(self):
+        from roi.roi_detector import detect_rois, evaluate_rois
+
+        image = np.zeros((64, 64), dtype=float)
+        image[12:18, 10:16] = 5.0
+        image[44:50, 46:52] = 4.8
+        x_span = (-0.05, 0.05)
+        y_span = (-0.05, 0.05)
+        tumor_xy = (-0.03, -0.03)
+        rois = detect_rois(
+            image,
+            threshold_ratio=0.6,
+            min_area=4,
+            margin=1,
+            sigma=0.4,
+            max_rois=4,
+            prior_xy_m=None,
+        )
+        self.assertGreaterEqual(len(rois), 2)
+        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=tumor_xy)
+        self.assertGreaterEqual(len(evaluated.rois), 2)
+        self.assertLess(evaluated.localization_roi.centroid[0], 25.0)
+
+    def test_prior_spot_is_kept_without_hiding_others(self):
+        from roi.roi_detector import detect_rois, evaluate_rois
+
+        image = np.zeros((64, 64), dtype=float)
+        image[12:18, 10:16] = 5.0
+        image[46:52, 48:54] = 0.35
+        x_span = (-0.05, 0.05)
+        y_span = (-0.05, 0.05)
+        tumor_xy = (0.03, 0.03)
+        rois = detect_rois(
+            image,
+            threshold_ratio=0.55,
+            min_area=4,
+            margin=1,
+            sigma=0.4,
+            max_rois=1,
+            min_score_ratio=0.9,
+            prior_xy_m=tumor_xy,
+            prior_weight=0.0,
+            x_span=x_span,
+            y_span=y_span,
+        )
+        self.assertGreaterEqual(len(rois), 2)
+        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=tumor_xy)
+        self.assertGreater(evaluated.localization_roi.centroid[0], 40.0)
+
+    def test_prior_spot_prefers_near_gt_over_window_edge_clutter(self):
+        from roi.roi_detector import detect_rois, evaluate_rois
+
+        image = np.zeros((64, 64), dtype=float)
+        image[12:18, 10:16] = 5.0
+        image[48:51, 48:51] = 1.0
+        image[40:44, 54:58] = 4.0
+        x_span = (-0.05, 0.05)
+        y_span = (-0.05, 0.05)
+        tumor_xy = (0.03, 0.03)
+        rois = detect_rois(
+            image,
+            threshold_ratio=0.55,
+            min_area=4,
+            margin=1,
+            sigma=0.4,
+            max_rois=1,
+            min_score_ratio=0.9,
+            prior_xy_m=tumor_xy,
+            x_span=x_span,
+            y_span=y_span,
+        )
+        self.assertGreaterEqual(len(rois), 2)
+        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=tumor_xy)
+        self.assertGreater(evaluated.localization_roi.centroid[0], 44.0)
+        self.assertGreater(evaluated.localization_roi.centroid[1], 44.0)
+
+    def test_detect_rois_keeps_separated_peaks_on_a_ring(self):
+        from roi.roi_detector import detect_rois
+
+        yy, xx = np.ogrid[:64, :64]
+        radius = np.hypot(xx - 31.5, yy - 31.5)
+        image = np.exp(-((radius - 18.0) ** 2) / (2.0 * 2.5**2))
+        image[12:15, 42:45] += 1.8
+        image[46:49, 16:19] += 1.6
+        rois = detect_rois(image, threshold_ratio=0.55, min_area=4, margin=1, sigma=0.5, max_rois=4)
+        self.assertGreaterEqual(len(rois), 2)
 
 
 if __name__ == "__main__":

@@ -337,12 +337,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-json",
-        default="../results/auto_intake_report.json",
+        default="results/auto_intake_report.json",
         help="Output JSON path (relative to project/).",
     )
     parser.add_argument(
         "--output-md",
-        default="../results/auto_intake_report.md",
+        default="results/auto_intake_report.md",
         help="Output markdown path (relative to project/).",
     )
     args = parser.parse_args()

@@ -32,6 +32,7 @@ class ValidationCache:
                 str(scan_index),
                 profile,
                 str(bool(include_reconstruction_checks)),
+                "detect-v8",
                 str(int(st.st_mtime)),
                 str(int(st.st_size)),
             ]

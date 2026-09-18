@@ -1,12 +1,13 @@
-"""Generate guide-facing and beginner-friendly automation reports."""
+"""Operational automation analysis report (not the mentor/beginner guides)."""
 
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 
-from automation.types import DatasetVerdict, ValidationBatchResult
+from automation.types import ValidationBatchResult
 
 _DISCLAIMER = (
     "**Important:** Model / reconstruction output is **not a clinical diagnosis**. "
@@ -15,271 +16,249 @@ _DISCLAIMER = (
 )
 
 
+def pick_showcase_result(batch: ValidationBatchResult):
+    """Choose the GUI case: labeled tumor first, then strongest candidate."""
+    if not batch.results:
+        return None
+
+    def _rank(item):
+        details = item.details or {}
+        cand = details.get("tumor_candidate") or {}
+        has_gt = 1 if details.get("has_tumor_gt") else 0
+        is_yes = 1 if cand.get("is_tumor_candidate") else 0
+        loc = details.get("localization_error_cm")
+        loc_rank = -float(loc) if isinstance(loc, (int, float)) else -1e3
+        conf = float(cand.get("confidence") or 0.0)
+        return (has_gt, is_yes, loc_rank, conf)
+
+    return max(batch.results, key=_rank)
+
+
 def write_automation_reports(batch: ValidationBatchResult, output_dir: str | Path) -> dict[str, str]:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    guide_md = _build_guide_report(batch)
-    beginner_md = _build_beginner_report(batch)
+    showcase = pick_showcase_result(batch)
+    copied = _copy_showcase_figures(showcase, out)
     payload = batch.to_dict()
     payload["generated_at"] = datetime.now().isoformat(timespec="seconds")
     payload["disclaimer"] = _DISCLAIMER
+    payload["showcase"] = None
+    if showcase is not None:
+        payload["showcase"] = {
+            "measurement_path": showcase.target.measurement_path,
+            "scan_index": showcase.target.scan_index,
+            "scan_label": showcase.target.scan_label,
+            "tumor_candidate": (showcase.details or {}).get("tumor_candidate"),
+            "has_tumor_gt": (showcase.details or {}).get("has_tumor_gt"),
+        }
 
+    analysis_md = _build_analysis_report(batch, showcase, copied)
     paths = {
-        "guide": out / "latest_guide_progress_report.md",
-        "beginner": out / "latest_beginner_explainer.md",
+        "analysis": out / "latest_auto_analysis.md",
         "json": out / "latest_auto_validation.json",
-        "guide_archive": out / f"guide_progress_report_{stamp}.md",
-        "beginner_archive": out / f"beginner_explainer_{stamp}.md",
-        "json_archive": out / f"auto_validation_{stamp}.json",
     }
-    paths["guide"].write_text(guide_md, encoding="utf-8")
-    paths["beginner"].write_text(beginner_md, encoding="utf-8")
+    paths["analysis"].write_text(analysis_md, encoding="utf-8")
     paths["json"].write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    paths["guide_archive"].write_text(guide_md, encoding="utf-8")
-    paths["beginner_archive"].write_text(beginner_md, encoding="utf-8")
-    paths["json_archive"].write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    for key, src in copied.items():
+        dest = out / f"latest_auto_{key}.png"
+        paths[f"figure_{key}"] = dest
     return {k: str(v) for k, v in paths.items()}
+
+
+def _copy_showcase_figures(showcase, output_dir: Path) -> dict[str, str]:
+    copied: dict[str, str] = {}
+    if showcase is None:
+        return copied
+    figures = (showcase.details or {}).get("figures") or {}
+    for key in ("selected", "beamformers", "roi_refine"):
+        src = figures.get(key)
+        if not src or not Path(src).is_file():
+            continue
+        dest = output_dir / f"latest_auto_{key}.png"
+        shutil.copy2(src, dest)
+        copied[key] = str(dest)
+    return copied
+
+
+def _yn(value: bool | None) -> str:
+    if value is None:
+        return "Unknown"
+    return "Yes" if value else "No"
 
 
 def _counts_table(batch: ValidationBatchResult) -> str:
     c = batch.counts or {}
+    n_yes = sum(
+        1
+        for item in batch.results
+        if ((item.details or {}).get("tumor_candidate") or {}).get("is_tumor_candidate")
+    )
     return (
         "| Status | Count |\n|---|---:|\n"
         f"| pass | {c.get('pass', 0)} |\n"
         f"| warning | {c.get('warning', 0)} |\n"
         f"| fail | {c.get('fail', 0)} |\n"
         f"| blocked | {c.get('blocked', 0)} |\n"
+        f"| tumor-candidate Yes | {n_yes} |\n"
     )
 
 
-def _sample_status_table(batch: ValidationBatchResult, limit: int = 12) -> str:
+def _detection_table(batch: ValidationBatchResult) -> str:
     lines = [
-        "| File | Scan | Status | Recommended | Key metric / reason |",
-        "|---|---:|---|---|---|",
+        "| File | Scan | GT tumor | Type | Predicted candidate | Spots | Loc. error (cm) | Beamformer | Why |",
+        "|---|---:|---|---|---|---:|---:|---|---|",
     ]
-    for item in batch.results[:limit]:
+    for item in batch.results:
+        details = item.details or {}
+        cand = details.get("tumor_candidate") or {}
+        tax = details.get("tumor_taxonomy") or {}
+        type_txt = tax.get("short_label")
+        if not type_txt:
+            parts = [
+                part
+                for part in (
+                    tax.get("size_class"),
+                    tax.get("severity_class"),
+                    tax.get("shape"),
+                    tax.get("location_quadrant"),
+                )
+                if part
+            ]
+            type_txt = "/".join(parts) if parts else ("healthy" if tax.get("presence") == "healthy" else "n/a")
         name = Path(item.target.measurement_path).name
         scan = "" if item.target.scan_index is None else str(item.target.scan_index)
-        reason = (item.reasons[0] if item.reasons else "").replace("|", "/")
-        conf = None
-        for m in item.metrics:
-            if m.name == "confidence" and m.value is not None:
-                conf = f"conf={m.value:.2f}"
-                break
-        evidence = conf or reason
+        loc = details.get("localization_error_cm")
+        loc_txt = f"{loc:.2f}" if isinstance(loc, (int, float)) else "n/a"
+        n_rois = details.get("n_rois") or cand.get("n_rois") or (details.get("reconstruction") or {}).get("n_rois") or 1
+        reason = str(cand.get("reason") or (item.reasons[0] if item.reasons else "")).replace("|", "/")
         lines.append(
-            f"| `{name}` | {scan} | {item.status.value} | "
-            f"{'yes' if item.recommended_upload else 'no'} | {evidence} |"
+            f"| `{name}` | {scan} | {_yn(details.get('has_tumor_gt'))} | {type_txt} | "
+            f"{_yn(cand.get('is_tumor_candidate'))} | {n_rois} | {loc_txt} | "
+            f"{details.get('selected_beamformer') or 'n/a'} | {reason} |"
         )
     if not batch.results:
-        lines.append("| _(none)_ |  |  |  |  |")
+        lines.append("| _(none)_ |  |  |  |  |  |  |  |  |")
     return "\n".join(lines)
 
 
-def _truthfulness_block(batch: ValidationBatchResult) -> str:
-    n = len(batch.results)
-    n_pass = batch.counts.get("pass", 0)
-    n_warn = batch.counts.get("warning", 0)
-    reliability = "low"
-    if n and (n_pass + n_warn) / n >= 0.8 and n_pass >= n_warn:
-        reliability = "moderate-to-high (for research demos)"
-    elif n and (n_pass + n_warn) / n >= 0.5:
-        reliability = "moderate"
-    return f"""### Interpretation and truthfulness analysis
-
-- Projected/reconstructed hotspots suggest where microwave energy focuses under the
-  chosen geometry and beamformer; they are **not** pathology labels.
-- Confidence scores combine image quality, detection features, beamformer margin,
-  localization evidence, and focus sharpness. They are heuristic, not calibrated clinical probabilities.
-- Current-run reliability estimate: **{reliability}** based on {n_pass} pass / {n_warn} warning / {n} total.
-- Uncertainty factors: antenna geometry assumptions, wave-speed model, clutter, ROI thresholding,
-  and limited healthy-vs-tumor calibration of decision gates.
-- Assumptions: BMID `_adi` uses pass-through preprocessing; Touchstone uses mild `.s2p` defaults;
-  multi-scan cubes use the configured BMID selection strategy (default first tumor else first).
-- Limitations: single-scan automation samples may miss hard cases; GT distance is available only
-  when metadata provides tumor coordinates.
-
-{_DISCLAIMER}
-"""
-
-
-def _gui_evidence_block() -> str:
-    return """### GUI evidence (one-click flow)
-
-1. **Where it starts:** Acquisition tab → **Run Auto Validation** (next to Load dataset).
-2. **What the user sees in logs:** progress lines for discover → resolve → load/preprocess/reconstruct → classify → report write.
-3. **Where reports are saved/opened:** `project/results/latest_guide_progress_report.md` and
-   `project/results/latest_beginner_explainer.md` (also timestamped archives + `latest_auto_validation.json`).
-4. **Popup:** end-of-run summary shows pass/warn/fail/blocked counts and recommended uploads.
-"""
+def _tumor_index_table(batch: ValidationBatchResult) -> str:
+    index = batch.tumor_index or []
+    if not index:
+        return "No UM-BMID metadata inventory was available for this run."
+    blocks = []
+    for entry in index:
+        examples = entry.get("examples") or []
+        example_txt = "; ".join(
+            f"scan {ex.get('index')} d={ex.get('tum_diam_cm')}cm @ "
+            f"({ex.get('tum_x_cm')},{ex.get('tum_y_cm')}) cm"
+            for ex in examples[:5]
+        ) or "(no labeled tumor examples listed)"
+        indices = ", ".join(str(i) for i in (entry.get("tumor_indices") or [])[:20])
+        if len(entry.get("tumor_indices") or []) > 20:
+            indices += ", …"
+        blocks.append(
+            "\n".join(
+                [
+                    f"### `{entry.get('file_name')}`",
+                    f"- Total scans: {entry.get('n_scans')}",
+                    f"- Labeled tumor scans: **{entry.get('n_tumor')}**",
+                    f"- Healthy scans: {entry.get('n_healthy')}",
+                    f"- Tumor scan indices: {indices or '(none)'}",
+                    f"- Examples: {example_txt}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
 
 
-def _build_guide_report(batch: ValidationBatchResult) -> str:
+def _case_walkthrough(batch: ValidationBatchResult, limit: int = 10) -> str:
+    if not batch.results:
+        return "No datasets were reconstructed in this run."
+    sections = []
+    for item in batch.results[:limit]:
+        details = item.details or {}
+        cand = details.get("tumor_candidate") or {}
+        recon = details.get("reconstruction") or {}
+        char = details.get("characterization") or {}
+        name = Path(item.target.measurement_path).name
+        loc = details.get("localization_error_cm")
+        loc_txt = f"{loc:.2f} cm" if isinstance(loc, (int, float)) else "n/a"
+        sections.append(
+            "\n".join(
+                [
+                    f"#### {name} (scan {item.target.scan_index if item.target.scan_index is not None else 'n/a'})",
+                    f"- Scan label: {item.target.scan_label or 'n/a'}",
+                    f"- Status: **{item.status.value}**",
+                    f"- GT tumor: {_yn(details.get('has_tumor_gt'))} at "
+                    f"({details.get('tumor_gt_x_cm')}, {details.get('tumor_gt_y_cm')}) cm",
+                    f"- Type/severity base: {(details.get('tumor_taxonomy') or {}).get('short_label', 'n/a')}",
+                    f"- Predicted tumor-candidate: **{_yn(cand.get('is_tumor_candidate'))}** "
+                    f"(score={cand.get('confidence')})",
+                    f"- Detected spots: {details.get('n_rois') or cand.get('n_rois') or 1}",
+                    f"- Beamformer: {recon.get('beamformer')}, ROI area={recon.get('roi_area_px')} px, "
+                    f"centroid=({recon.get('centroid_x_cm')}, {recon.get('centroid_y_cm')}) cm",
+                    f"- Localization error: {loc_txt}; FWHM={char.get('fwhm_cm')}; "
+                    f"local SCR={char.get('local_scr')}",
+                    f"- Interpretation: {cand.get('reason') or (item.reasons[0] if item.reasons else '')}",
+                ]
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def _build_analysis_report(batch: ValidationBatchResult, showcase, copied: dict[str, str]) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    modules = """
-| Module | Status | Purpose | Input | Output | Handling logic |
-|---|---|---|---|---|---|
-| 1 Acquisition | Completed | Load & validate measurements | `.mat` / `.sNp` / BMID cube | `MicrowaveDataset` | Extension checks, BMID scan pick, metadata extract |
-| 2 Preprocessing | Completed | Clean S21 (`.s2p`) or pass-through BMID | Dataset + config | Filtered/time-domain variants | Conditional spike/filter/Hamming/IFFT/ref/clutter |
-| 3 Freq→Time | Completed | IFFT path for beamforming | Frequency S21 | Time signals | `dt=1/(NΔf)` axis |
-| 4 Reconstruction | Completed | Form image | Time/freq S + geometry | DAS/DMAS/DMAS-D4 images | Shared FOV/grid |
-| 5 Quality select | Completed | Pick best beamformer | Candidate images | Selected image + scores | Quality / prefer / force / GT modes |
-| 6 ROI localize | Completed | Find suspicious region | Selected image | Mask/bbox/centroid | Compactness + edge penalties |
-| 7 ROI refine | Completed (core) | High-res ROI re-image | ROI bbox | Refined image | Local finer grid |
-| 8 Detection | Completed (core) | Tumor-candidate decision | ROI features | Yes/No + confidence | Suspicion + clutter penalties |
-| 9 Characterization | Completed (core) | Quantitative descriptors | ROI + FOV | cm size/shape/intensity | Physical pixel scales |
-| 10 Confidence | Completed (core) | Unified reliability score | Metrics + candidate | 0–1 + label | Weighted components |
-| 11 Visualization | Completed (core) | Interactive review | Pipeline state | Plots/tables | PySide6 tabs |
-| 12 Reporting | Completed | Export session + automation docs | Context/batch | MD/JSON/PNG/PDF | Autosave + one-click automation |
-"""
-    innovations = """
-### Innovations beyond baseline
+    showcase_block = "No showcase case was selected."
+    if showcase is not None:
+        cand = (showcase.details or {}).get("tumor_candidate") or {}
+        showcase_block = (
+            f"- File: `{Path(showcase.target.measurement_path).name}`\n"
+            f"- Scan: {showcase.target.scan_index} — {showcase.target.scan_label or ''}\n"
+            f"- Tumor-candidate: **{_yn(cand.get('is_tumor_candidate'))}** "
+            f"(confidence {cand.get('confidence')})\n"
+            f"- Figures: {', '.join(f'`latest_auto_{k}.png`' for k in copied) or 'none'}\n"
+        )
+        if copied.get("selected"):
+            showcase_block += "\n![Selected reconstruction](latest_auto_selected.png)\n"
+        if copied.get("beamformers"):
+            showcase_block += "\n![Beamformer comparison](latest_auto_beamformers.png)\n"
+        if copied.get("roi_refine"):
+            showcase_block += "\n![ROI refine](latest_auto_roi_refine.png)\n"
 
-- Dual-path preprocessing (BMID pass-through vs UG Touchstone Week 1–3).
-- Compact/edge-aware ROI scoring and explicit tumor-candidate classifier.
-- Module 9 physical characterization + Module 10 unified confidence.
-- **New:** end-to-end auto validation with threshold profiles, cache, MCP tools, and dual reports.
-"""
-    issues = """
-### Key issues faced and fixes
-
-| Issue | Fix |
-|---|---|
-| Report export failed on arbitrary Windows folders | Write to `results/` first, optional copy |
-| BMID multi-scan requires interactive picker | Automation resolves scan via strategy (`first_tumor_else_first`) |
-| Duplicate re-checks slow batch runs | SHA cache keyed by path/mtime/size/profile |
-| Metadata-only files look like datasets | Classifier + resolver pairs `md_list_*` → `fd_data_*` |
-"""
-    roadmap = """
-### Roadmap / next steps
-
-1. Calibrate gates on larger healthy-vs-tumor BMID subsets.
-2. Optional Week-3 time-domain as default reconstruction input.
-3. Expand MCP tools for per-module dry-runs.
-4. Submission-ready PDF export of automation reports.
-"""
-    return f"""# Guide-Facing Progress Report (Report A)
+    return f"""# Auto Analysis Report
 
 - Generated: {now}
-- Threshold profile: **{batch.profile}**
+- Profile: **{batch.profile}**
 - Roots: {', '.join(f'`{r}`' for r in batch.roots) or '(none)'}
 - Summary: {batch.message}
 
 {_DISCLAIMER}
 
-## 1. Module-wise progress
+This file is the **automation output**. Mentor guide and beginner explainer
+documents are separate reference notes; they are not generated here.
 
-{modules}
+## 1. Where tumors are in the dataset
 
-{innovations}
+{_tumor_index_table(batch)}
 
-## 2. Current validation evidence (this run)
-
-### Pass / warn / fail counts
-
-{_counts_table(batch)}
-
-### Sample dataset statuses
-
-{_sample_status_table(batch)}
-
-{_gui_evidence_block()}
-
-{_truthfulness_block(batch)}
-
-{issues}
-
-{roadmap}
-"""
-
-
-def _build_beginner_report(batch: ValidationBatchResult) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    return f"""# Beginner-Friendly Project Explainer (Report B)
-
-- Generated: {now}
-- Auto-validation profile: **{batch.profile}**
-
-{_DISCLAIMER}
-
-## 1. Simple flow (input → output)
-
-1. **Load** a measurement file (`.s2p` or BMID `.mat`).
-2. **Preprocess** (clean `.s2p`, or leave BMID `_adi` as-is).
-3. **Reconstruct** images with DAS / DMAS / DMAS-D4.
-4. **Find ROI** (bright suspicious spot) and refine it.
-5. **Decide** tumor-candidate Yes/No and measure size/confidence.
-6. **Export** session report and/or run **Auto Validation** for batch checks.
-
-## 2. Each module in plain words
-
-| Module | Input | Process | Output |
-|---|---|---|---|
-| 1 | File path | Open + check | Clean dataset object |
-| 2 | Dataset | Filter / optional IFFT path | Cleaner signals |
-| 3 | Frequency data | Convert to time | Time traces |
-| 4 | Signals + antenna geometry | Beamform | Breast/phantom image |
-| 5 | Three images | Score & pick best | Selected image |
-| 6 | Selected image | Find hotspot | ROI box |
-| 7 | ROI | Zoom reconstruct | Sharper local image |
-| 8 | ROI features | Decide candidate | Yes/No + score |
-| 9 | ROI | Measure size/shape | cm descriptors |
-| 10 | All evidence | Combine | Overall confidence |
-| 11 | Everything | Show plots | GUI views |
-| 12 | Results | Write files | MD/JSON/PNG reports |
-
-## 3. Practical run checklist
-
-- [ ] Place data under `project/datasets/` (or point roots elsewhere).
-- [ ] For BMID, keep `fd_data_*.mat` beside `md_list_*.mat` when possible.
-- [ ] Open GUI → Acquisition → **Run Auto Validation** (or CLI/MCP).
-- [ ] Read `results/latest_guide_progress_report.md` and `latest_beginner_explainer.md`.
-- [ ] Only upload files marked **recommended**.
-- [ ] Remember: not a clinical diagnosis.
-
-## 4. Common mistakes
-
-| Mistake | How to avoid |
-|---|---|
-| Heavy filtering on BMID `_adi` | Use pass-through preset |
-| Loading BMID cube with no scan index | Let automation strategy choose, or pick in GUI |
-| Judging only by bright color | Check ROI distance, SCR, confidence, reasons |
-| Exporting to odd folders on Windows | Prefer `results/` (automation already does) |
-| Treating confidence as diagnosis | Read disclaimer; use as research signal only |
-
-## 5. Glossary
-
-- **S21**: Transmission measurement between antennas.
-- **BMID**: University of Manitoba breast microwave imaging dataset family.
-- **DAS / DMAS / DMAS-D4**: Beamforming algorithms (delay-and-sum family).
-- **ROI**: Region of interest (suspicious area).
-- **SCR / SNR**: Contrast / signal quality ratios.
-- **Pass / Warning / Fail / Blocked**: Automation quality classes.
-
-## 6. FAQ
-
-**Q: Why is my tumor scan a warning?**  
-A: Localization error or confidence may miss a gate. Read remediation tips in the JSON/MD.
-
-**Q: What does recommended upload mean?**  
-A: Automation judged the file usable for demo/upload under the selected profile—not medically verified.
-
-**Q: Where do I click?**  
-A: Acquisition tab → **Run Auto Validation**. Logs stream on the right; reports open from `results/`.
-
-## 7. Evidence from this run
-
-### Counts
+## 2. Detection results (this run)
 
 {_counts_table(batch)}
 
-### Sample statuses
+{_detection_table(batch)}
 
-{_sample_status_table(batch)}
+## 3. Showcase case (auto-opened in GUI)
 
-{_gui_evidence_block()}
+{showcase_block}
 
-{_truthfulness_block(batch)}
+## 4. What the pipeline did instead of manual GUI analysis
+
+{_case_walkthrough(batch)}
+
+## 5. How to read this without opening every GUI tab
+
+1. Use **section 1** to find labeled tumor scan indices in UM-BMID files.
+2. Use **section 2** for Yes/No candidate decisions, type/severity labels, and localization error.
+3. Use **section 3** images as the Reconstruction Image / Compare / ROI refine tabs.
+4. A recommended tumor case is also loaded into the GUI after Auto Validation.
 """

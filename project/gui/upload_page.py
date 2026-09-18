@@ -39,13 +39,17 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
-from automation.service import AutoValidationService
+from automation.reports import pick_showcase_result
+from automation.service import AutoValidationService, default_validation_roots, umbmid_root
+from gui.plotting import make_gui_figure, plot_complex_matrix, show_message
 from data_loader.bmid_loader import (
     BmidScanInfo,
     ScanSelectionRequiredError,
@@ -57,6 +61,7 @@ from data_loader.bmid_loader import (
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.loader import load_dataset_with_summary
 from gui.styles import set_page_title, set_primary_button
+from quality.tumor_taxonomy import taxonomy_from_metadata, taxonomy_from_scan
 from utils.exceptions import MicrowaveFrameworkError
 from utils.logger import StatusLog, get_logger
 
@@ -81,10 +86,12 @@ class AutoValidationWorker(QThread):
         self,
         roots: list[str],
         *,
-        max_files: int = 8,
+        max_files: int = 1,
         threshold_profile: str = "balanced",
         include_reconstruction_checks: bool = True,
         output_dir: str | None = None,
+        bmid_strategy: str = "diverse",
+        max_bmid_scans: int = 8,
     ) -> None:
         super().__init__()
         self.roots = roots
@@ -92,6 +99,8 @@ class AutoValidationWorker(QThread):
         self.threshold_profile = threshold_profile
         self.include_reconstruction_checks = include_reconstruction_checks
         self.output_dir = output_dir
+        self.bmid_strategy = bmid_strategy
+        self.max_bmid_scans = max_bmid_scans
 
     def run(self) -> None:
         try:
@@ -101,7 +110,10 @@ class AutoValidationWorker(QThread):
                 max_files=self.max_files,
                 threshold_profile=self.threshold_profile,
                 include_reconstruction_checks=self.include_reconstruction_checks,
+                bmid_strategy=self.bmid_strategy,
+                max_bmid_scans=self.max_bmid_scans,
                 progress=lambda pct, msg: self.progress_updated.emit(pct, msg),
+                should_stop=self.isInterruptionRequested,
             )
             self.finished_ok.emit(batch)
         except Exception as exc:  # pragma: no cover - defensive GUI path
@@ -132,7 +144,16 @@ class BmidScanPickerDialog(QDialog):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Filter:"))
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All", "Tumor only", "Healthy only"])
+        self.filter_combo.addItems(
+            [
+                "All",
+                "Tumor only",
+                "Healthy only",
+                "Small tumor",
+                "Medium tumor",
+                "Large tumor",
+            ]
+        )
         self.filter_combo.currentTextChanged.connect(self._repopulate)
         filter_row.addWidget(self.filter_combo, stretch=1)
         layout.addLayout(filter_row)
@@ -152,9 +173,16 @@ class BmidScanPickerDialog(QDialog):
         mode = self.filter_combo.currentText()
         self.list_widget.clear()
         for scan in self._scans:
+            tax = taxonomy_from_scan(scan)
             if mode == "Tumor only" and not scan.has_tumor:
                 continue
             if mode == "Healthy only" and scan.has_tumor:
+                continue
+            if mode == "Small tumor" and tax.size_class != "small":
+                continue
+            if mode == "Medium tumor" and tax.size_class != "medium":
+                continue
+            if mode == "Large tumor" and tax.size_class != "large":
                 continue
             self.list_widget.addItem(scan.label)
             item = self.list_widget.item(self.list_widget.count() - 1)
@@ -178,6 +206,7 @@ class UploadPage(QWidget):
     """
 
     dataset_loaded = Signal(object)  # emits MicrowaveDataset
+    auto_validation_finished = Signal(object)  # emits ValidationBatchResult
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -198,27 +227,47 @@ class UploadPage(QWidget):
         set_page_title(title, "Data Acquisition")
         title_col.addWidget(title)
         subtitle = QLabel(
-            "Load MATLAB (.mat) or Touchstone (.sNp). BMID cubes open a scan picker. "
-            "Use Run Auto Validation for batch quality checks + dual reports."
+            "Load Dataset opens umbmid/simple-clean so you can pick gen 1 "
+            "(matlab-data), gen 2 (matlab-data2), or gen 3 (matlab-data3), "
+            "then an fd_data_gen_*.mat cube — not metadata under project/datasets. "
+            "Auto Validation defaults to a small diverse subset (healthy + "
+            "small/medium/large tumors). Use All scans only when you want the full 2000+ run."
         )
         subtitle.setObjectName("hintLabel")
         subtitle.setWordWrap(True)
         title_col.addWidget(subtitle)
         header.addLayout(title_col, stretch=1)
+        layout.addLayout(header)
 
+        actions = QHBoxLayout()
         self.load_button = QPushButton("Load dataset")
         set_primary_button(self.load_button)
         self.load_button.clicked.connect(self.on_load_dataset_clicked)
-        header.addWidget(self.load_button)
+        actions.addWidget(self.load_button)
 
         self.auto_validate_button = QPushButton("Run Auto Validation")
         self.auto_validate_button.setToolTip(
-            "Discover datasets, run load/preprocess/reconstruction checks, "
-            "classify pass/warn/fail, and write guide + beginner reports."
+            "Reconstruct a small diverse UM-BMID subset (not all 2264 scans), "
+            "write an analysis report, and load the best tumor case into the GUI."
         )
         self.auto_validate_button.clicked.connect(self.on_run_auto_validation_clicked)
-        header.addWidget(self.auto_validate_button)
-        layout.addLayout(header)
+        actions.addWidget(self.auto_validate_button)
+
+        self.auto_scope_combo = QComboBox()
+        self.auto_scope_combo.addItem("Periodic test (8 diverse scans)", "diverse")
+        self.auto_scope_combo.addItem("Tumor + healthy pair", "tumor_and_healthy")
+        self.auto_scope_combo.addItem("All scans (slow, 2000+)", "all")
+        self.auto_scope_combo.setToolTip(
+            "Periodic test is the default. All scans reconstructs every labeled case and takes a long time."
+        )
+        actions.addWidget(self.auto_scope_combo)
+
+        self.cancel_auto_button = QPushButton("Cancel Auto Validation")
+        self.cancel_auto_button.setEnabled(False)
+        self.cancel_auto_button.clicked.connect(self.on_cancel_auto_validation_clicked)
+        actions.addWidget(self.cancel_auto_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
 
         self.file_label = QLabel("No file loaded.")
         self.file_label.setObjectName("hintLabel")
@@ -235,14 +284,27 @@ class UploadPage(QWidget):
         self.info_table.verticalHeader().setVisible(False)
         self.info_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.info_table.setAlternatingRowColors(True)
+        self.info_table.setMaximumHeight(160)
         info_col.addWidget(self.info_table)
-        body.addLayout(info_col, stretch=1)
+
+        info_col.addWidget(QLabel("Raw traces (after load)"))
+        self.raw_figure = make_gui_figure(8.6, 6.4)
+        self.raw_canvas = FigureCanvasQTAgg(self.raw_figure)
+        self.raw_canvas.setMinimumHeight(420)
+        self.raw_canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        info_col.addWidget(self.raw_canvas, stretch=3)
+        show_message(self.raw_figure, "Load a dataset to see Real / Imag / |S| of the S matrix.")
+        self.raw_canvas.draw()
+        body.addLayout(info_col, stretch=3)
 
         log_col = QVBoxLayout()
         log_col.addWidget(QLabel("Log"))
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
+        self.log_view.setMinimumWidth(260)
         log_col.addWidget(self.log_view)
         body.addLayout(log_col, stretch=1)
 
@@ -252,18 +314,32 @@ class UploadPage(QWidget):
         line = self.status_log.add(message, level)
         self.log_view.appendPlainText(line)
 
+    def _default_load_dir(self) -> str:
+        """Open at umbmid/simple-clean so gen 1/2/3 folders can be chosen."""
+        umbmid = umbmid_root()
+        if umbmid is not None:
+            return str(umbmid)
+        fallback = Path(__file__).resolve().parent.parent / "datasets"
+        return str(fallback if fallback.is_dir() else Path.cwd())
+
     def on_load_dataset_clicked(self) -> None:
-        start_dir = os.path.join(os.getcwd(), "datasets")
-        if not os.path.isdir(start_dir):
-            start_dir = os.getcwd()
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Load Microwave Dataset", start_dir, SUPPORTED_FILE_FILTER
+        start_dir = self._default_load_dir()
+        dialog = QFileDialog(
+            self,
+            "Load UM-BMID cube — choose gen 1 / 2 / 3, then fd_data_gen_*.mat",
+            start_dir,
+            SUPPORTED_FILE_FILTER,
         )
-        if not file_path:
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setDirectory(start_dir)
+        dialog.setSidebarUrls([QUrl.fromLocalFile(start_dir)])
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-
-        self.load_dataset_from_path(file_path)
+        chosen = dialog.selectedFiles()
+        if not chosen:
+            return
+        self.load_dataset_from_path(chosen[0])
 
     def load_dataset_from_path(
         self, file_path: str, scan_index: int | None = None
@@ -277,10 +353,17 @@ class UploadPage(QWidget):
                 )
                 file_path = resolved
             else:
-                self._log(
-                    "Selected file appears metadata-only and no paired fd_data file was found automatically.",
-                    "WARN",
+                umbmid = umbmid_root()
+                hint = (
+                    "Selected file is metadata-only (no S-parameter measurements). "
+                    "Open an fd_data_*.mat cube under umbmid/simple-clean: "
+                    "matlab-data (gen 1), matlab-data2 (gen 2), or matlab-data3 (gen 3)."
                 )
+                if umbmid is not None:
+                    hint += f"\nUM-BMID folder: {umbmid}"
+                self._log(hint, "ERROR")
+                QMessageBox.warning(self, "Metadata File — Not a Measurement", hint)
+                return
 
         self._log(f"Loading file: {file_path}")
         try:
@@ -344,10 +427,13 @@ class UploadPage(QWidget):
                 if meta.get("bmid_has_tumor")
                 else "Healthy (no tumor)"
             )
+            tax = taxonomy_from_metadata(meta)
+            display.update(tax.to_display_dict())
             display["Antenna Radius"] = (
                 f"{meta.get('antenna_radius_m', 0) * 100:.0f} cm"
             )
         self._populate_info_table(display)
+        self._plot_raw_traces(dataset)
         self._log(f"Dataset '{summary.file_name}' loaded successfully.", "SUCCESS")
         self.dataset_loaded.emit(dataset)
 
@@ -358,41 +444,76 @@ class UploadPage(QWidget):
             self.info_table.setItem(row, 1, QTableWidgetItem(str(value)))
         self.info_table.resizeColumnsToContents()
 
+    def _plot_raw_traces(self, dataset: MicrowaveDataset) -> None:
+        plot_complex_matrix(
+            self.raw_figure,
+            dataset.frequencies,
+            dataset.s_parameters,
+            "Loaded S-parameters",
+        )
+        self.raw_canvas.draw()
+
+    def _auto_validation_scope(self) -> tuple[str, int, int]:
+        strategy = str(self.auto_scope_combo.currentData() or "diverse")
+        if strategy == "all":
+            return "all", 20, 0
+        if strategy == "tumor_and_healthy":
+            return "tumor_and_healthy", 1, 2
+        return "diverse", 1, 8
+
     def on_run_auto_validation_clicked(self) -> None:
         if self._auto_worker is not None and self._auto_worker.isRunning():
             QMessageBox.information(
                 self,
                 "Auto Validation Running",
-                "Validation is already in progress. Watch the log panel for updates.",
+                "Validation is already in progress. Use Cancel Auto Validation to stop it after the current scan.",
             )
             return
 
-        datasets_dir = Path(__file__).resolve().parent.parent / "datasets"
-        roots = [str(datasets_dir)] if datasets_dir.is_dir() else [os.getcwd()]
+        strategy, max_files, max_scans = self._auto_validation_scope()
+        roots = default_validation_roots()
         self._log(
-            f"Starting auto validation under: {roots[0]} (profile=balanced)",
+            f"Starting auto validation on UM-BMID cubes: {', '.join(roots)} "
+            f"(strategy={strategy}, max_files={max_files}, max_scans={max_scans}, profile=balanced). "
+            "project/datasets sample files are not used.",
             "INFO",
         )
         self.auto_validate_button.setEnabled(False)
+        self.auto_scope_combo.setEnabled(False)
+        self.cancel_auto_button.setEnabled(True)
         self.load_button.setEnabled(False)
         self._auto_worker = AutoValidationWorker(
             roots,
-            max_files=8,
+            max_files=max_files,
             threshold_profile="balanced",
             include_reconstruction_checks=True,
             output_dir=self._results_dir,
+            bmid_strategy=strategy,
+            max_bmid_scans=max_scans,
         )
         self._auto_worker.progress_updated.connect(self._on_auto_progress)
         self._auto_worker.finished_ok.connect(self._on_auto_finished)
         self._auto_worker.failed.connect(self._on_auto_failed)
         self._auto_worker.start()
 
+    def on_cancel_auto_validation_clicked(self) -> None:
+        if self._auto_worker is None or not self._auto_worker.isRunning():
+            return
+        self._auto_worker.requestInterruption()
+        self.cancel_auto_button.setEnabled(False)
+        self._log("Stopping auto validation after the current scan…")
+
     def _on_auto_progress(self, percent: int, message: str) -> None:
         self._log(f"[Auto {percent}%] {message}")
 
-    def _on_auto_failed(self, message: str) -> None:
+    def _reset_auto_buttons(self) -> None:
         self.auto_validate_button.setEnabled(True)
+        self.auto_scope_combo.setEnabled(True)
+        self.cancel_auto_button.setEnabled(False)
         self.load_button.setEnabled(True)
+
+    def _on_auto_failed(self, message: str) -> None:
+        self._reset_auto_buttons()
         self._log(f"Auto validation failed: {message}", "ERROR")
         QMessageBox.critical(
             self,
@@ -401,21 +522,32 @@ class UploadPage(QWidget):
         )
 
     def _on_auto_finished(self, batch) -> None:
-        self.auto_validate_button.setEnabled(True)
-        self.load_button.setEnabled(True)
+        self._reset_auto_buttons()
         self._log(batch.message, "SUCCESS")
-        guide = batch.report_paths.get("guide")
-        beginner = batch.report_paths.get("beginner")
-        recommended = [r for r in batch.results if r.recommended_upload]
+        analysis = batch.report_paths.get("analysis")
+        n_yes = sum(
+            1
+            for r in batch.results
+            if ((r.details or {}).get("tumor_candidate") or {}).get("is_tumor_candidate")
+        )
+        showcase = pick_showcase_result(batch)
+        showcase_line = "No showcase case selected."
+        if showcase is not None:
+            showcase_line = (
+                f"Showcase: {Path(showcase.target.measurement_path).name} "
+                f"scan {showcase.target.scan_index}"
+            )
+            self._log(showcase_line, "INFO")
+        cancelled = str(batch.message).lower().startswith("cancelled")
+        title = "Auto Validation Cancelled" if cancelled else "Auto Validation Complete"
         summary = (
             f"{batch.message}\n\n"
-            f"Recommended uploads: {len(recommended)}\n"
-            f"Guide report:\n{guide}\n\n"
-            f"Beginner report:\n{beginner}"
+            f"Tumor-candidate Yes: {n_yes}\n"
+            f"{showcase_line}\n"
+            f"Analysis report:\n{analysis}"
         )
-        QMessageBox.information(self, "Auto Validation Complete", summary)
-        if guide and os.path.isfile(guide):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(guide))
-        elif beginner and os.path.isfile(beginner):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(beginner))
+        QMessageBox.information(self, title, summary)
+        if analysis and os.path.isfile(analysis):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(analysis))
+        self.auto_validation_finished.emit(batch)
 

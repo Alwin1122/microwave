@@ -9,7 +9,7 @@ from pathlib import Path
 from automation.types import DiscoveredFile, FileKind
 from data_loader.validator import SUPPORTED_EXTENSIONS
 
-_MD_RE = re.compile(r"^md_list_.*\.mat$", re.IGNORECASE)
+_MD_RE = re.compile(r"^(md_list_|metadata_).*\.mat$", re.IGNORECASE)
 _FD_RE = re.compile(r"^fd_data_.*\.mat$", re.IGNORECASE)
 
 
@@ -60,6 +60,14 @@ def discover_files(roots: list[str], max_files: int = 50) -> list[DiscoveredFile
                 continue
             seen.add(resolved)
             found.append(item)
-            if len(found) >= max_files:
-                return found
-    return found
+
+    def _rank(item: DiscoveredFile) -> tuple[int, str]:
+        name = item.basename.lower()
+        if name.startswith("fd_data_"):
+            return (0, name)
+        if item.kind == FileKind.MEASUREMENT:
+            return (1, name)
+        return (2, name)
+
+    found.sort(key=_rank)
+    return found[: max(1, int(max_files))]

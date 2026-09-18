@@ -50,6 +50,7 @@ class ReconstructionSnapshot:
     tumor_candidate_result: dict[str, Any] | None = None
     tumor_characterization: dict[str, float] | None = None
     reconstruction_confidence: dict[str, Any] | None = None
+    rois: list[ROIResult] = field(default_factory=list)
 
 
 @dataclass
@@ -264,6 +265,10 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
         f"- Axis flip: x={cfg.antenna_flip_x}, y={cfg.antenna_flip_y}",
         f"- Antenna arc: {cfg.antenna_span_deg:.0f}°",
         f"- Wave speed: {cfg.wave_speed:.3g} m/s",
+        f"- DAS coherence γ: {cfg.das_coherence_gamma:.2f} (textbook 0)",
+        f"- DMAS pair exponent: {cfg.dmas_pair_exponent:.2f} (textbook 0.50)",
+        f"- DMAS coherence γ: {cfg.dmas_coherence_gamma:.2f} (textbook 0)",
+        f"- DMAS-D4 exponent: {cfg.dmas_d4_exponent:.2f} (textbook 0.25)",
         f"- FOV x: ({cfg.x_span[0]*100:.1f}, {cfg.x_span[1]*100:.1f}) cm",
         f"- FOV y: ({cfg.y_span[0]*100:.1f}, {cfg.y_span[1]*100:.1f}) cm",
         f"- Image peak / mean: {_fmt(snap.image_peak)} / {_fmt(snap.image_mean)}",
@@ -291,6 +296,15 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
             f"- Score: {roi.score:.5g}",
         ]
     )
+    extra = [item for item in (snap.rois or []) if item is not roi]
+    if extra or (snap.rois and len(snap.rois) > 1):
+        lines.append(f"- Detected spots: {len(snap.rois)}")
+        for item in snap.rois:
+            lines.append(
+                f"- Spot #{item.rank}: bbox={item.bounding_box}, "
+                f"centroid=({item.centroid[0]:.1f}, {item.centroid[1]:.1f}), "
+                f"score={item.score:.5g}"
+            )
     if snap.roi_centroid_m is not None:
         lines.append(
             f"- Centroid (cm): ({snap.roi_centroid_m[0]*100:.2f}, {snap.roi_centroid_m[1]*100:.2f})"
@@ -427,6 +441,10 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
             "wave_speed_m_per_s": cfg.wave_speed,
             "x_span_m": list(cfg.x_span),
             "y_span_m": list(cfg.y_span),
+            "das_coherence_gamma": cfg.das_coherence_gamma,
+            "dmas_pair_exponent": cfg.dmas_pair_exponent,
+            "dmas_coherence_gamma": cfg.dmas_coherence_gamma,
+            "dmas_d4_exponent": cfg.dmas_d4_exponent,
         },
         "quality_metrics": snap.quality_metrics,
         "roi": {
@@ -436,6 +454,17 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
             "threshold": roi.threshold,
             "score": roi.score,
             "centroid_m": list(snap.roi_centroid_m) if snap.roi_centroid_m else None,
+            "n_rois": len(snap.rois or []),
+            "spots": [
+                {
+                    "rank": item.rank,
+                    "bounding_box": list(item.bounding_box),
+                    "centroid_px": list(item.centroid),
+                    "area": item.area,
+                    "score": item.score,
+                }
+                for item in (snap.rois or [roi])
+            ],
         },
         "tumor_xy_m": list(snap.tumor_xy_m) if snap.tumor_xy_m else None,
         "tumor_gt_distance_m": snap.tumor_gt_distance_m,

@@ -30,13 +30,25 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "roots": {"type": "array", "items": {"type": "string"}},
-                "max_files": {"type": "integer", "default": 20},
+                "max_files": {"type": "integer", "default": 1},
                 "threshold_profile": {
                     "type": "string",
                     "enum": ["strict", "balanced", "lenient"],
                     "default": "balanced",
                 },
                 "include_reconstruction_checks": {"type": "boolean", "default": True},
+                "bmid_strategy": {
+                    "type": "string",
+                    "enum": [
+                        "diverse",
+                        "tumor_and_healthy",
+                        "first",
+                        "first_healthy",
+                        "all",
+                    ],
+                    "default": "diverse",
+                },
+                "max_bmid_scans": {"type": "integer", "default": 8},
             },
             "required": ["roots"],
         },
@@ -83,11 +95,13 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
                 return _err("roots is required")
             batch = service.run(
                 list(roots),
-                max_files=int(arguments.get("max_files", 20)),
+                max_files=int(arguments.get("max_files", 1)),
                 threshold_profile=str(arguments.get("threshold_profile", "balanced")),
                 include_reconstruction_checks=bool(
                     arguments.get("include_reconstruction_checks", True)
                 ),
+                bmid_strategy=str(arguments.get("bmid_strategy", "diverse")),
+                max_bmid_scans=int(arguments.get("max_bmid_scans", 8)),
             )
             return _ok(
                 {

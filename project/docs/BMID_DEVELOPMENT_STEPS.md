@@ -56,7 +56,7 @@ Run:
 
 **Added**
 - `utils/session_report.py`
-- Autosave in `gui/main_window.py` → `results/latest_session_report.*` + timestamped copies.
+- Autosave in `gui/main_window.py` → `results/latest_session_report.*` (overwritten in place).
 - Manual **Download Final Report** button kept.
 
 **Checks included:** frequency validity, SNR, artifact ratio, ROI↔GT thresholds (OK ≤1.5 cm, WARN ≤3 cm).
@@ -174,7 +174,7 @@ Use these for BMID scan 0 demos and as Auto Tweak starting point:
 ## Step 10 — What was intentionally not committed
 
 - Large BMID frequency cubes (`fd_data_*.mat`, ~220 MB).
-- Bulk timestamped session report PNGs/JSON clutter (keep generating locally under `results/`).
+- Regenerated session reports under `results/` (`latest_session_report.*` only).
 - Virtual environments (`.venv_local`, etc.).
 
 Metadata lists such as `md_list_s21_adi.mat` may be committed if small; the S21 cube must be obtained from UM-BMID / IEEE DataPort.

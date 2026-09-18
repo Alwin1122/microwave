@@ -28,6 +28,7 @@ BMID_N_FREQ = 1001
 
 _FD_NAME_RE = re.compile(r"^fd_data_(s11|s21)(?:_(adi|emp))?$", re.IGNORECASE)
 _FD_FILE_RE = re.compile(r"fd_data_(s11|s21)(?:_(adi|emp))?\.mat$", re.IGNORECASE)
+_FD_GENERIC_RE = re.compile(r"^fd_data_(.+)_(s11|s21)\.mat$", re.IGNORECASE)
 _MD_LIST_FILE_RE = re.compile(r"md_list_(s11|s21)(?:_(adi|emp))?\.mat$", re.IGNORECASE)
 _GENERIC_MD_FILE_RE = re.compile(r"metadata_(.+)\.mat$", re.IGNORECASE)
 
@@ -38,6 +39,7 @@ _SEARCH_SKIP_DIRS = {
     "__pycache__",
     "results",
     "node_modules",
+    "datasets",
 }
 
 
@@ -53,6 +55,7 @@ class BmidScanInfo:
     birads: int | None
     ant_rad_cm: float | None
     label: str
+    tum_shape: str | None = None
 
 
 class ScanSelectionRequiredError(MissingVariableError):
@@ -64,7 +67,13 @@ class ScanSelectionRequiredError(MissingVariableError):
 
 
 def is_bmid_fd_filename(file_path: str) -> bool:
-    return bool(_FD_FILE_RE.search(os.path.basename(file_path)))
+    base = os.path.basename(file_path)
+    lowered = base.lower()
+    return bool(
+        _FD_FILE_RE.search(base)
+        or _FD_GENERIC_RE.match(base)
+        or (lowered.startswith("fd_data_") and lowered.endswith(".mat"))
+    )
 
 
 def bmid_frequencies_hz() -> np.ndarray:
@@ -75,13 +84,23 @@ def companion_metadata_path(fd_file_path: str) -> str | None:
     """Map fd_data_s21_adi.mat -> md_list_s21_adi.mat in the same folder."""
     base = os.path.basename(fd_file_path)
     match = _FD_FILE_RE.search(base)
-    if not match:
-        return None
-    sparam = match.group(1).lower()
-    cal = match.group(2)
-    name = f"md_list_{sparam}_{cal}.mat" if cal else f"md_list_{sparam}.mat"
-    candidate = os.path.join(os.path.dirname(fd_file_path), name)
-    return candidate if os.path.isfile(candidate) else None
+    if match:
+        sparam = match.group(1).lower()
+        cal = match.group(2)
+        name = f"md_list_{sparam}_{cal}.mat" if cal else f"md_list_{sparam}.mat"
+        candidate = os.path.join(os.path.dirname(fd_file_path), name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # Support simple-clean naming: fd_data_gen_two_s11.mat -> metadata_gen_two.mat
+    generic = _FD_GENERIC_RE.match(base)
+    if generic:
+        group_name = generic.group(1)
+        candidate = os.path.join(os.path.dirname(fd_file_path), f"metadata_{group_name}.mat")
+        if os.path.isfile(candidate):
+            return candidate
+
+    return None
 
 
 def is_likely_metadata_file(file_path: str) -> bool:
@@ -123,8 +142,13 @@ def _search_for_candidate_in_repo(start_path: str, candidate_names: list[str]) -
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     names_set = {name.lower() for name in candidate_names}
 
-    # Prioritize siblings near the selected metadata file first.
-    near_roots = [os.path.dirname(start_path), os.path.dirname(os.path.dirname(start_path))]
+    # Prefer the real UM-BMID tree over leftover sample files under project/datasets.
+    umbmid = os.path.join(repo_root, "umbmid", "simple-clean")
+    near_roots = [
+        os.path.dirname(start_path),
+        os.path.dirname(os.path.dirname(start_path)),
+        umbmid,
+    ]
     for root in near_roots:
         if not root or not os.path.isdir(root):
             continue
@@ -211,6 +235,8 @@ def _load_metadata_structs(md_path: str) -> list:
 
 def list_bmid_scans(fd_file_path: str) -> list[BmidScanInfo]:
     """Build a scan list from companion metadata (preferred) or cube length."""
+    from quality.tumor_taxonomy import taxonomy_from_scan
+
     md_path = companion_metadata_path(fd_file_path)
     if md_path is None:
         n_scans = peek_bmid_n_scans(fd_file_path)
@@ -234,17 +260,45 @@ def list_bmid_scans(fd_file_path: str) -> list[BmidScanInfo]:
     scans: list[BmidScanInfo] = []
     for index, item in enumerate(structs):
         tum_diam = _safe_float(getattr(item, "tum_diam", np.nan))
-        has_tumor = tum_diam is not None and tum_diam > 0
+        tum_rad = _safe_float(getattr(item, "tum_rad", np.nan))
+        # Some metadata variants store only radius. Use that when diameter is absent.
+        if tum_diam is None and tum_rad is not None and tum_rad > 0:
+            tum_diam = 2.0 * tum_rad
         phant_id = _safe_str(getattr(item, "phant_id", "")) or "unknown"
         tum_x = _safe_float(getattr(item, "tum_x", np.nan))
         tum_y = _safe_float(getattr(item, "tum_y", np.nan))
+        has_tumor = (
+            (tum_diam is not None and tum_diam > 0)
+            or (tum_x is not None and tum_y is not None and (abs(tum_x) > 0 or abs(tum_y) > 0))
+        )
         birads = _safe_int(getattr(item, "birads", np.nan))
         ant_rad = _safe_float(getattr(item, "ant_rad", np.nan))
         scan_id = _safe_int(getattr(item, "id", index + 1))
+        tum_shape = _safe_str(getattr(item, "tum_shape", "")) or None
         if has_tumor:
+            pos_x = f"{tum_x:.2f}" if tum_x is not None else "?"
+            pos_y = f"{tum_y:.2f}" if tum_y is not None else "?"
+            diam_txt = f"{tum_diam:.1f}" if tum_diam is not None else "?"
+            shape_txt = f" {tum_shape}" if tum_shape else ""
+            birads_txt = f" BIRADS={birads}" if birads is not None else ""
+            preview = BmidScanInfo(
+                index=index,
+                scan_id=scan_id,
+                phant_id=phant_id,
+                has_tumor=True,
+                tum_diam_cm=tum_diam,
+                tum_x_cm=tum_x,
+                tum_y_cm=tum_y,
+                birads=birads,
+                ant_rad_cm=ant_rad,
+                label="",
+                tum_shape=tum_shape,
+            )
+            tax = taxonomy_from_scan(preview)
+            extra = f" [{tax.short_label()}]"
             label = (
-                f"[{index}] id={scan_id} {phant_id} TUMOR "
-                f"d={tum_diam:.1f}cm @ ({tum_x:.2f},{tum_y:.2f}) cm"
+                f"[{index}] id={scan_id} {phant_id} TUMOR{shape_txt} "
+                f"d={diam_txt}cm{birads_txt} @ ({pos_x},{pos_y}) cm{extra}"
             )
         else:
             label = f"[{index}] id={scan_id} {phant_id} HEALTHY"
@@ -260,6 +314,7 @@ def list_bmid_scans(fd_file_path: str) -> list[BmidScanInfo]:
                 birads=birads,
                 ant_rad_cm=ant_rad,
                 label=label,
+                tum_shape=tum_shape if has_tumor else None,
             )
         )
     return scans
@@ -342,6 +397,7 @@ def _metadata_dict_for_scan(fd_file_path: str, scan_index: int, scan_info: BmidS
                 "bmid_phant_id": scan_info.phant_id,
                 "bmid_has_tumor": scan_info.has_tumor,
                 "bmid_birads": scan_info.birads,
+                "bmid_tum_shape": scan_info.tum_shape,
                 "tumor_diameter_m": (
                     scan_info.tum_diam_cm / 100.0 if scan_info.tum_diam_cm is not None else None
                 ),
@@ -349,6 +405,9 @@ def _metadata_dict_for_scan(fd_file_path: str, scan_index: int, scan_info: BmidS
                 "tumor_y_m": scan_info.tum_y_cm / 100.0 if scan_info.tum_y_cm is not None else None,
             }
         )
+        from quality.tumor_taxonomy import taxonomy_from_scan
+
+        metadata["tumor_taxonomy"] = taxonomy_from_scan(scan_info).to_dict()
     return metadata
 
 

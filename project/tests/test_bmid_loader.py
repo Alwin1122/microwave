@@ -96,6 +96,7 @@ class TestBmidLoader(unittest.TestCase):
     def test_filename_detection(self):
         self.assertTrue(is_bmid_fd_filename("fd_data_s21_adi.mat"))
         self.assertTrue(is_bmid_fd_filename(r"C:\\data\\fd_data_s11_emp.mat"))
+        self.assertTrue(is_bmid_fd_filename("fd_data_gen_two_s11.mat"))
         self.assertFalse(is_bmid_fd_filename("sample_matlab.mat"))
 
     def test_synthetic_scan_load(self):
@@ -105,6 +106,7 @@ class TestBmidLoader(unittest.TestCase):
             scans = list_bmid_scans(fd_path)
             self.assertEqual(len(scans), 3)
             self.assertTrue(scans[0].has_tumor)
+            self.assertEqual(scans[0].tum_shape, "sphere")
             self.assertFalse(scans[1].has_tumor)
 
             with self.assertRaises(ScanSelectionRequiredError):
@@ -118,6 +120,8 @@ class TestBmidLoader(unittest.TestCase):
             self.assertAlmostEqual(ds.metadata["antenna_radius_m"], 0.18, places=6)
             self.assertTrue(ds.metadata["bmid_has_tumor"])
             self.assertAlmostEqual(ds.metadata["tumor_x_m"], 0.015, places=6)
+            self.assertIn("tumor_taxonomy", ds.metadata)
+            self.assertEqual(ds.metadata["tumor_taxonomy"]["size_class"], "small")
 
     @unittest.skipUnless(
         os.path.isfile(os.path.join(DATASETS_DIR, "fd_data_s21_adi.mat"))

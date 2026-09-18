@@ -27,11 +27,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
-from datetime import datetime
-
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -40,6 +37,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -55,6 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from automation.reports import pick_showcase_result
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.loader import load_dataset
 from gui.reconstruction_page import ReconstructionPanel
@@ -66,6 +65,8 @@ from preprocessing.preprocessing_pipeline import (
     PreprocessingResult,
     run_preprocessing_pipeline,
 )
+from reconstruction.ifft import frequency_to_time, time_axis_seconds
+from gui.plotting import finish_figure, make_gui_figure, plot_complex_matrix, plot_freq_to_time, show_message
 from utils.exceptions import MicrowaveFrameworkError
 from utils.logger import StatusLog, get_logger
 from utils.session_report import SessionReportContext, write_session_report
@@ -179,11 +180,29 @@ class PreprocessingPanel(QWidget):
         plots_page = QWidget()
         plots_layout = QVBoxLayout(plots_page)
         plots_layout.setContentsMargins(4, 12, 4, 4)
-        self.figure = Figure(figsize=(8, 5.5), tight_layout=True)
+        self.figure = make_gui_figure(8.5, 6.2)
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.setMinimumHeight(420)
         self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         plots_layout.addWidget(self.canvas)
         self.workspace_tabs.addTab(plots_page, "Plots")
+
+        stages_page = QWidget()
+        stages_layout = QHBoxLayout(stages_page)
+        stages_layout.setContentsMargins(4, 12, 4, 4)
+        stages_side = QVBoxLayout()
+        stages_side.addWidget(QLabel("Click a step to inspect Real / Imag / |S|"))
+        self.stage_list = QListWidget()
+        self.stage_list.currentTextChanged.connect(self._on_stage_selected)
+        stages_side.addWidget(self.stage_list)
+        stages_layout.addLayout(stages_side, stretch=1)
+        self.stages_figure = make_gui_figure(8.5, 6.2)
+        self.stages_canvas = FigureCanvasQTAgg(self.stages_figure)
+        self.stages_canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        stages_layout.addWidget(self.stages_canvas, stretch=3)
+        self.workspace_tabs.addTab(stages_page, "Stages")
 
         # --- Settings ---
         settings_page = QWidget()
@@ -548,7 +567,8 @@ class PreprocessingPanel(QWidget):
             )
         self._populate_summary(result)
         self._plot_result(result)
-        self.workspace_tabs.setCurrentIndex(0)
+        self._load_stage_list(result)
+        self.workspace_tabs.setCurrentIndex(1)
         self.run_button.setEnabled(True)
         self.export_button.setEnabled(True)
         self.preprocessing_completed.emit(result)
@@ -619,34 +639,43 @@ class PreprocessingPanel(QWidget):
         trace_idx = 0
 
         ax1 = self.figure.add_subplot(2, 2, 1)
-        ax1.plot(freqs_ghz, 20 * np.log10(np.abs(orig_flat[:, trace_idx]) + 1e-12))
-        ax1.set_title("Original Signal")
-        ax1.set_xlabel("Frequency (GHz)")
-        ax1.set_ylabel("Magnitude (dB)")
+        ax1.plot(freqs_ghz, orig_flat[:, trace_idx].real, label="Real")
+        ax1.plot(freqs_ghz, orig_flat[:, trace_idx].imag, label="Imag", alpha=0.8)
+        ax1.set_title("Original S — Real / Imag", fontsize=10, pad=8)
+        ax1.set_xlabel("Frequency (GHz)", fontsize=8)
+        ax1.set_ylabel("Amplitude", fontsize=8)
+        ax1.tick_params(labelsize=7)
+        ax1.legend(fontsize=7, loc="best", framealpha=0.9)
         ax1.grid(True, alpha=0.3)
 
         ax2 = self.figure.add_subplot(2, 2, 2)
-        ax2.plot(
-            freqs_ghz,
-            20 * np.log10(np.abs(proc_flat[:, trace_idx]) + 1e-12),
-            color="darkorange",
-        )
-        ax2.set_title("Processed Signal")
-        ax2.set_xlabel("Frequency (GHz)")
-        ax2.set_ylabel("Magnitude (dB)")
+        ax2.plot(freqs_ghz, proc_flat[:, trace_idx].real, label="Real")
+        ax2.plot(freqs_ghz, proc_flat[:, trace_idx].imag, label="Imag", alpha=0.8)
+        ax2.set_title("After preprocessing — Real / Imag", fontsize=10, pad=8)
+        ax2.set_xlabel("Frequency (GHz)", fontsize=8)
+        ax2.set_ylabel("Amplitude", fontsize=8)
+        ax2.tick_params(labelsize=7)
+        ax2.legend(fontsize=7, loc="best", framealpha=0.9)
         ax2.grid(True, alpha=0.3)
 
         ax3 = self.figure.add_subplot(2, 2, 3)
         ax3.plot(
-            freqs_ghz, np.abs(orig_flat[:, trace_idx]), label="Original", alpha=0.7
+            freqs_ghz,
+            20 * np.log10(np.abs(orig_flat[:, trace_idx]) + 1e-12),
+            label="Original |S|",
+            alpha=0.7,
         )
         ax3.plot(
-            freqs_ghz, np.abs(proc_flat[:, trace_idx]), label="Processed", alpha=0.7
+            freqs_ghz,
+            20 * np.log10(np.abs(proc_flat[:, trace_idx]) + 1e-12),
+            label="Processed |S|",
+            alpha=0.7,
         )
-        ax3.set_title("Comparison Plot")
-        ax3.set_xlabel("Frequency (GHz)")
-        ax3.set_ylabel("Magnitude (linear)")
-        ax3.legend(fontsize=8)
+        ax3.set_title("Magnitude comparison (dB)", fontsize=10, pad=8)
+        ax3.set_xlabel("Frequency (GHz)", fontsize=8)
+        ax3.set_ylabel("Magnitude (dB)", fontsize=8)
+        ax3.tick_params(labelsize=7)
+        ax3.legend(fontsize=7, loc="best", framealpha=0.9)
         ax3.grid(True, alpha=0.3)
 
         ax4 = self.figure.add_subplot(2, 2, 4)
@@ -654,13 +683,14 @@ class PreprocessingPanel(QWidget):
         mean_mag_after = np.mean(np.abs(proc_flat), axis=1)
         ax4.plot(freqs_ghz, mean_mag_before, label="Before", alpha=0.7)
         ax4.plot(freqs_ghz, mean_mag_after, label="After", alpha=0.7)
-        ax4.set_title("Frequency Response (Mean over Traces)")
-        ax4.set_xlabel("Frequency (GHz)")
-        ax4.set_ylabel("Magnitude (linear)")
-        ax4.legend(fontsize=8)
+        ax4.set_title("Mean |S| over traces", fontsize=10, pad=8)
+        ax4.set_xlabel("Frequency (GHz)", fontsize=8)
+        ax4.set_ylabel("Magnitude (linear)", fontsize=8)
+        ax4.tick_params(labelsize=7)
+        ax4.legend(fontsize=7, loc="best", framealpha=0.9)
         ax4.grid(True, alpha=0.3)
 
-        self.figure.tight_layout()
+        finish_figure(self.figure)
         self.canvas.draw()
 
     def _plot_touchstone_result(self, result: PreprocessingResult) -> None:
@@ -757,8 +787,56 @@ class PreprocessingPanel(QWidget):
         ax6.legend(fontsize=8)
         ax6.grid(True, alpha=0.3)
 
-        self.figure.tight_layout()
+        finish_figure(self.figure)
         self.canvas.draw()
+
+    def _load_stage_list(self, result: PreprocessingResult) -> None:
+        self.stage_list.blockSignals(True)
+        self.stage_list.clear()
+        for name in (result.stage_outputs or {}):
+            self.stage_list.addItem(name)
+        self.stage_list.addItem("Freq → time look")
+        if self.stage_list.count():
+            self.stage_list.setCurrentRow(0)
+        self.stage_list.blockSignals(False)
+        self._on_stage_selected(self.stage_list.currentItem().text() if self.stage_list.currentItem() else "")
+
+    def _on_stage_selected(self, name: str) -> None:
+        result = self.last_result
+        if result is None or not name:
+            return
+        if name == "Freq → time look":
+            dataset = result.processed_dataset
+            try:
+                time_signals = frequency_to_time(dataset.s_parameters, dataset.frequencies)
+                time_s = time_axis_seconds(dataset.frequencies, time_signals.shape[0])
+            except Exception as exc:
+                show_message(self.stages_figure, f"Freq → time not available: {exc}")
+                self.stages_canvas.draw()
+                return
+            plot_freq_to_time(
+                self.stages_figure,
+                dataset.frequencies,
+                dataset.s_parameters,
+                time_s,
+                time_signals,
+            )
+            self.stages_canvas.draw()
+            return
+        arr = (result.stage_outputs or {}).get(name)
+        if arr is None:
+            show_message(self.stages_figure, f"No matrix stored for {name}.")
+            self.stages_canvas.draw()
+            return
+        freqs = result.original_dataset.frequencies
+        previous = None
+        names = list(result.stage_outputs.keys())
+        if name in names:
+            idx = names.index(name)
+            if idx > 0:
+                previous = result.stage_outputs.get(names[idx - 1])
+        plot_complex_matrix(self.stages_figure, freqs, arr, name, previous=previous)
+        self.stages_canvas.draw()
 
 
 class MainWindow(QMainWindow):
@@ -777,6 +855,7 @@ class MainWindow(QMainWindow):
         self.preprocessing_panel = PreprocessingPanel()
         self.reconstruction_panel = ReconstructionPanel()
         self._session_dataset: MicrowaveDataset | None = None
+        self._auto_continue_to_reconstruction = False
 
         tabs = QTabWidget()
         tabs.addTab(self.upload_page, "Acquisition")
@@ -797,6 +876,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.auto_report_label)
 
         self.upload_page.dataset_loaded.connect(self._on_dataset_loaded)
+        self.upload_page.auto_validation_finished.connect(self._on_auto_validation_finished)
         self.preprocessing_panel.preprocessing_completed.connect(
             self._on_preprocessing_completed
         )
@@ -822,11 +902,29 @@ class MainWindow(QMainWindow):
         self.auto_report_label.setText(
             "Auto-report: dataset loaded — run preprocess/reconstruct"
         )
+        if self._auto_continue_to_reconstruction:
+            self.preprocessing_panel.on_run_clicked()
 
     def _on_preprocessing_completed(self, result: PreprocessingResult) -> None:
         self.reconstruction_panel.set_processed_dataset(result.processed_dataset)
         self._tabs.setCurrentWidget(self.reconstruction_panel)
         self._autosave_session_report(reason="preprocessing")
+        if self._auto_continue_to_reconstruction:
+            self._auto_continue_to_reconstruction = False
+            self.reconstruction_panel.on_run_clicked()
+
+    def _on_auto_validation_finished(self, batch) -> None:
+        showcase = pick_showcase_result(batch)
+        if showcase is None:
+            return
+        self._auto_continue_to_reconstruction = True
+        self.auto_report_label.setText(
+            "Auto-report: loading showcase tumor case into GUI…"
+        )
+        self.upload_page.load_dataset_from_path(
+            showcase.target.measurement_path,
+            scan_index=showcase.target.scan_index,
+        )
 
     def _on_reconstruction_completed(self, _snapshot) -> None:
         self.reconstruction_panel.export_report_button.setEnabled(True)
@@ -845,22 +943,18 @@ class MainWindow(QMainWindow):
         )
 
     def _autosave_session_report(self, reason: str) -> None:
-        """Rewrite results/latest_session_report.* plus a timestamped archive copy."""
+        """Rewrite results/latest_session_report.* in place (no timestamped copies)."""
         ctx = self._build_report_context()
         if ctx is None:
             return
 
         try:
             os.makedirs(self._results_dir, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archive_stem = f"session_report_{stamp}"
             figure_paths: list[str] = []
             if ctx.reconstruction is not None:
                 figure_paths = self.reconstruction_panel.save_figures(
                     self._results_dir, "latest_session_report"
                 )
-                # Also keep timestamped figure copies next to the archive report.
-                self.reconstruction_panel.save_figures(self._results_dir, archive_stem)
 
             latest_paths = write_session_report(
                 ctx,
@@ -868,27 +962,14 @@ class MainWindow(QMainWindow):
                 basename="latest_session_report",
                 figure_paths=figure_paths,
             )
-            archive_paths = write_session_report(
-                ctx,
-                output_dir=self._results_dir,
-                basename=archive_stem,
-                figure_paths=[
-                    os.path.join(self._results_dir, f"{archive_stem}_selected.png"),
-                    os.path.join(self._results_dir, f"{archive_stem}_beamformers.png"),
-                    os.path.join(self._results_dir, f"{archive_stem}_roi_refine.png"),
-                ]
-                if ctx.reconstruction is not None
-                else None,
-            )
             self._latest_report_paths = latest_paths
             self.auto_report_label.setText(
                 f"Auto-report updated ({reason}): results/latest_session_report.md"
             )
             logger.info(
-                "Auto-saved session report (%s) to %s and %s",
+                "Auto-saved session report (%s) to %s",
                 reason,
                 latest_paths["markdown"],
-                archive_paths["markdown"],
             )
         except Exception:
             logger.exception("Auto-save of session report failed")
@@ -912,27 +993,16 @@ class MainWindow(QMainWindow):
         results_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_stem = f"session_report_{stamp}"
-            figure_paths: list[str] = []
-            if ctx.reconstruction is not None:
-                figure_paths = self.reconstruction_panel.save_figures(
-                    str(results_dir), file_stem
-                )
-            paths = write_session_report(
-                ctx,
-                output_dir=str(results_dir),
-                basename=file_stem,
-                figure_paths=figure_paths,
-            )
-            self._latest_report_paths = paths
-
-            generated = [paths["markdown"], paths["json"], *figure_paths]
-            # Include same-scale / validation figures written next to the report.
-            for extra in results_dir.glob(f"{file_stem}_*.png"):
+            paths = self._latest_report_paths or {}
+            generated = []
+            for key in ("markdown", "json"):
+                if paths.get(key):
+                    generated.append(paths[key])
+            for extra in results_dir.glob("latest_session_report*.png"):
                 extra_s = str(extra)
                 if extra_s not in generated:
                     generated.append(extra_s)
+            figure_paths = [p for p in generated if p.lower().endswith(".png")]
 
             target_dir = QFileDialog.getExistingDirectory(
                 self,
@@ -962,10 +1032,12 @@ class MainWindow(QMainWindow):
                         "Report is still available under results/."
                     )
 
+            md_path = paths.get("markdown") or str(results_dir / "latest_session_report.md")
+            json_path = paths.get("json") or str(results_dir / "latest_session_report.json")
             message = (
                 f"Report saved under results/:\n\n"
-                f"Markdown: {paths['markdown']}\n"
-                f"JSON: {paths['json']}"
+                f"Markdown: {md_path}\n"
+                f"JSON: {json_path}"
                 f"{copy_note}"
             )
             if copied:
@@ -973,7 +1045,7 @@ class MainWindow(QMainWindow):
             elif figure_paths:
                 message += "\nFigures:\n- " + "\n- ".join(Path(p).name for p in figure_paths)
             QMessageBox.information(self, "Final Report Saved", message)
-            logger.info("Session report written to %s", paths["markdown"])
+            logger.info("Session report written to %s", md_path)
         except Exception as exc:
             logger.exception("Failed to write session report")
             QMessageBox.critical(

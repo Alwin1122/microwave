@@ -41,7 +41,7 @@ _PROFILES: dict[str, ThresholdProfile] = {
         min_scr=2.0,
         min_snr=0.5,
         min_confidence=0.35,
-        require_tumor_candidate_if_gt=False,
+        require_tumor_candidate_if_gt=True,
     ),
     "lenient": ThresholdProfile(
         name="lenient",

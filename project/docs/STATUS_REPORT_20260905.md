@@ -143,15 +143,15 @@ Pending improvement:
 
 ### Selected reconstruction
 
-![Selected reconstruction output](../../results/latest_session_report_selected.png)
+![Selected reconstruction output](../results/latest_session_report_selected.png)
 
 ### Beamformer comparison
 
-![Beamformer comparison output](../../results/latest_session_report_beamformers.png)
+![Beamformer comparison output](../results/latest_session_report_beamformers.png)
 
 ### ROI refinement output
 
-![ROI refinement output](../../results/latest_session_report_roi_refine.png)
+![ROI refinement output](../results/latest_session_report_roi_refine.png)
 
 ## Next immediate focus
 

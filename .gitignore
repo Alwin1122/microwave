@@ -33,16 +33,21 @@ project/datasets/fd_data_*.mat
 **/fd_data_s11*.mat
 **/fd_data_s21*.mat
 
-# Session report archives (regenerated locally; docs describe how)
+# Generated reports (rewritten in place as latest_*; ignore leftovers)
 project/results/session_report_*
 project/results/latest_session_report*
 project/results/latest_guide_progress_report.md
 project/results/latest_beginner_explainer.md
 project/results/latest_auto_validation.json
+project/results/latest_auto_analysis.md
+project/results/latest_auto_*.png
+project/results/auto_cases/
+project/results/latest_detailed_beginner_project_report.md
 project/results/guide_progress_report_*
 project/results/beginner_explainer_*
 project/results/auto_validation_*
 project/results/.auto_validation_cache/
+project/results/profile_*/
 project/session_report_*
 project/results/*_module3_handoff.*
 project/results/*_handoff.*

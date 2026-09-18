@@ -31,15 +31,21 @@ python -m unittest discover -s tests -v
 
 ### Auto Validation (one-click / CLI / MCP)
 
-Batch-discover datasets, run quality gates (`strict` / `balanced` / `lenient`), and write dual reports:
+Batch-discover datasets, reconstruct labeled tumor scans, and write an analysis report:
 
 ```bash
-python tools/run_auto_validation.py --roots datasets --profile balanced --max-files 5
+python tools/run_auto_validation.py --profile balanced
+```
+
+Default is a **diverse 8-scan subset** from the first UM-BMID cube (healthy + small/medium/large tumors). Full 2264-scan runs:
+
+```bash
+python tools/run_auto_validation.py --bmid-strategy all --max-bmid-scans 0 --max-files 20
 ```
 
 In the GUI: **Acquisition → Run Auto Validation**.  
 Docs: `docs/AUTO_VALIDATION.md`  
-Outputs: `results/latest_guide_progress_report.md`, `results/latest_beginner_explainer.md`
+Output: `results/latest_auto_analysis.md` (mentor/beginner guides are separate docs, not auto-generated)
 
 Sample files: `python datasets/generate_sample_data.py`
 

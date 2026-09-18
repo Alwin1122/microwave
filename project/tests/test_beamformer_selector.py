@@ -20,6 +20,7 @@ class TestBeamformerSelector(unittest.TestCase):
         selected, metrics = select_best_beamformer(images, timings, mode="prefer_dmas_d4")
         self.assertEqual(selected, "DMAS-D4")
         self.assertEqual(metrics["DMAS-D4"].get("selection_mode"), "prefer_dmas_d4")
+        self.assertIn("Prefer DMAS-D4", str(metrics["DMAS-D4"].get("selection_reason")))
 
     def test_tumor_gt_mode_picks_closer_roi(self):
         das = np.zeros((32, 32), dtype=float)

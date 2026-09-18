@@ -48,3 +48,17 @@ def frequency_to_time(
     n_out = n_freq + zero_padding
     time_domain = np.fft.ifft(s_parameters, n=n_out, axis=axis)
     return time_domain
+
+
+def time_axis_seconds(
+    frequencies: np.ndarray, n_samples: int | None = None
+) -> np.ndarray:
+    """Return t[n] = n / (N Δf) for a uniform frequency axis."""
+    frequencies = np.asarray(frequencies, dtype=float)
+    if frequencies.ndim != 1 or frequencies.size < 2:
+        raise ValueError("Frequencies must be a 1D array with at least two samples.")
+    n = int(n_samples if n_samples is not None else frequencies.shape[0])
+    delta_f = float(np.mean(np.diff(frequencies)))
+    if delta_f <= 0:
+        raise ValueError("Frequency spacing must be positive.")
+    return np.arange(n, dtype=float) * (1.0 / (delta_f * n))

@@ -7,9 +7,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from reconstruction.das import das_from_frequency
-from reconstruction.dmas import dmas_reconstruct
-from reconstruction.dmas_d4 import dmas_d4_reconstruct
+from reconstruction.das import DEFAULT_DAS_COHERENCE_GAMMA, das_from_frequency
+from reconstruction.dmas import (
+    DEFAULT_DMAS_COHERENCE_GAMMA,
+    DEFAULT_DMAS_EPS,
+    DEFAULT_DMAS_PAIR_EXPONENT,
+    dmas_reconstruct,
+)
+from reconstruction.dmas_d4 import DEFAULT_DMAS_D4_EXPONENT, dmas_d4_reconstruct
 from reconstruction.ifft import frequency_to_time
 
 
@@ -42,6 +47,12 @@ class ReconstructionConfig:
     antenna_flip_y: bool = False
     antenna_span_deg: float = 360.0
     use_bmid_phase_delay_radius: bool = False
+    # BMID-tuned beamformer constants (textbook values noted in das/dmas modules).
+    das_coherence_gamma: float = DEFAULT_DAS_COHERENCE_GAMMA
+    dmas_pair_exponent: float = DEFAULT_DMAS_PAIR_EXPONENT
+    dmas_coherence_gamma: float = DEFAULT_DMAS_COHERENCE_GAMMA
+    dmas_eps: float = DEFAULT_DMAS_EPS
+    dmas_d4_exponent: float = DEFAULT_DMAS_D4_EXPONENT
 
 
 @dataclass
@@ -143,7 +154,13 @@ def _reconstruct_single(
     grid_y: np.ndarray,
     zero_padding: int = 0,
     wave_speed: float = 3e8,
+    config: ReconstructionConfig | None = None,
 ) -> np.ndarray:
+    gamma = DEFAULT_DAS_COHERENCE_GAMMA if config is None else float(config.das_coherence_gamma)
+    pair_exp = DEFAULT_DMAS_PAIR_EXPONENT if config is None else float(config.dmas_pair_exponent)
+    dmas_cf = DEFAULT_DMAS_COHERENCE_GAMMA if config is None else float(config.dmas_coherence_gamma)
+    dmas_eps = DEFAULT_DMAS_EPS if config is None else float(config.dmas_eps)
+    d4_exp = DEFAULT_DMAS_D4_EXPONENT if config is None else float(config.dmas_d4_exponent)
     if algorithm == "DAS":
         return das_from_frequency(
             s_parameters,
@@ -153,13 +170,35 @@ def _reconstruct_single(
             grid_y,
             zero_padding=zero_padding,
             wave_speed=wave_speed,
+            coherence_gamma=gamma,
         )
 
     time_signals = frequency_to_time(s_parameters, frequencies, zero_padding=zero_padding)
     if algorithm == "DMAS":
-        return dmas_reconstruct(time_signals, frequencies, antenna_positions, grid_x, grid_y, wave_speed=wave_speed)
+        return dmas_reconstruct(
+            time_signals,
+            frequencies,
+            antenna_positions,
+            grid_x,
+            grid_y,
+            wave_speed=wave_speed,
+            pair_exponent=pair_exp,
+            coherence_gamma=dmas_cf,
+            eps=dmas_eps,
+        )
     if algorithm == "DMAS-D4":
-        return dmas_d4_reconstruct(time_signals, frequencies, antenna_positions, grid_x, grid_y, wave_speed=wave_speed)
+        return dmas_d4_reconstruct(
+            time_signals,
+            frequencies,
+            antenna_positions,
+            grid_x,
+            grid_y,
+            wave_speed=wave_speed,
+            pair_exponent=pair_exp,
+            coherence_gamma=dmas_cf,
+            eps=dmas_eps,
+            d4_exponent=d4_exp,
+        )
 
     raise ValueError(f"Unsupported beamformer '{algorithm}'.")
 
@@ -250,15 +289,37 @@ def reconstruct_all(
         grid_y,
         zero_padding=zero_padding,
         wave_speed=wave_speed,
+        coherence_gamma=DEFAULT_DAS_COHERENCE_GAMMA if config is None else float(config.das_coherence_gamma),
     )
     timings["DAS"] = time.perf_counter() - start
 
     start = time.perf_counter()
-    images["DMAS"] = dmas_reconstruct(time_signals, frequencies, antenna_positions, grid_x, grid_y, wave_speed=wave_speed)
+    images["DMAS"] = dmas_reconstruct(
+        time_signals,
+        frequencies,
+        antenna_positions,
+        grid_x,
+        grid_y,
+        wave_speed=wave_speed,
+        pair_exponent=DEFAULT_DMAS_PAIR_EXPONENT if config is None else float(config.dmas_pair_exponent),
+        coherence_gamma=DEFAULT_DMAS_COHERENCE_GAMMA if config is None else float(config.dmas_coherence_gamma),
+        eps=DEFAULT_DMAS_EPS if config is None else float(config.dmas_eps),
+    )
     timings["DMAS"] = time.perf_counter() - start
 
     start = time.perf_counter()
-    images["DMAS-D4"] = dmas_d4_reconstruct(time_signals, frequencies, antenna_positions, grid_x, grid_y, wave_speed=wave_speed)
+    images["DMAS-D4"] = dmas_d4_reconstruct(
+        time_signals,
+        frequencies,
+        antenna_positions,
+        grid_x,
+        grid_y,
+        wave_speed=wave_speed,
+        pair_exponent=DEFAULT_DMAS_PAIR_EXPONENT if config is None else float(config.dmas_pair_exponent),
+        coherence_gamma=DEFAULT_DMAS_COHERENCE_GAMMA if config is None else float(config.dmas_coherence_gamma),
+        eps=DEFAULT_DMAS_EPS if config is None else float(config.dmas_eps),
+        d4_exponent=DEFAULT_DMAS_D4_EXPONENT if config is None else float(config.dmas_d4_exponent),
+    )
     timings["DMAS-D4"] = time.perf_counter() - start
 
     if return_timings:
@@ -320,6 +381,7 @@ def reconstruct_high_resolution_roi(
         grid_y,
         zero_padding=zero_padding,
         wave_speed=wave_speed,
+        config=config,
     )
 
     return ROIRefinement(

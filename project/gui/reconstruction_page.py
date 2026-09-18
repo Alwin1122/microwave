@@ -8,7 +8,6 @@ import os
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -30,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from data_loader.dataset_info import MicrowaveDataset
+from gui.plotting import finish_figure, make_gui_figure, plot_complex_matrix, plot_reconstruction_trace, show_message
 from gui.styles import set_page_title, set_primary_button
 from quality.beamformer_selector import select_best_beamformer
 from reconstruction.auto_calibrate import (
@@ -45,12 +45,12 @@ from reconstruction.reconstruction_manager import (
 )
 from quality.characterization import characterize_tumor_region
 from quality.confidence import assess_reconstruction_confidence
+from quality.tumor_taxonomy import taxonomy_from_metadata
+from reconstruction.ifft import frequency_to_time, time_axis_seconds
 from roi.roi_detector import (
-
     ROIResult,
-    classify_tumor_candidate,
-    detect_roi,
-    roi_centroid_meters,
+    detect_rois,
+    evaluate_rois,
 )
 from utils.logger import StatusLog, get_logger
 from utils.session_report import ReconstructionSnapshot
@@ -116,10 +116,16 @@ class ReconstructionPanel(QWidget):
         self.processed_dataset: MicrowaveDataset | None = None
         self.status_log = StatusLog()
         self.last_roi_result: ROIResult | None = None
+        self.last_roi_results: list[ROIResult] = []
         self.last_roi_refinement: ROIRefinement | None = None
         self.last_snapshot: ReconstructionSnapshot | None = None
         self.last_auto_result: AutoCalibrateResult | None = None
         self.auto_worker: AutoCalibrateWorker | None = None
+        self.last_time_signals = None
+        self.last_time_axis = None
+        self.last_images: dict = {}
+        self.last_s_params = None
+        self.last_frequencies = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -170,13 +176,26 @@ class ReconstructionPanel(QWidget):
         overview_tab = QWidget()
         overview_layout = QVBoxLayout(overview_tab)
         overview_layout.setContentsMargins(4, 12, 4, 4)
-        self.selected_figure = Figure(figsize=(7, 5.5), tight_layout=True)
+        self.selected_figure = make_gui_figure(7.5, 6.0)
         self.selected_canvas = FigureCanvasQTAgg(self.selected_figure)
+        self.selected_canvas.setMinimumHeight(360)
         self.selected_canvas.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         overview_layout.addWidget(self.selected_canvas)
         self.content_tabs.addTab(overview_tab, "Image")
+
+        trace_tab = QWidget()
+        trace_layout = QVBoxLayout(trace_tab)
+        trace_layout.setContentsMargins(4, 12, 4, 4)
+        self.steps_figure = make_gui_figure(9.0, 6.4)
+        self.steps_canvas = FigureCanvasQTAgg(self.steps_figure)
+        self.steps_canvas.setMinimumHeight(420)
+        self.steps_canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        trace_layout.addWidget(self.steps_canvas)
+        self.content_tabs.addTab(trace_tab, "Trace")
 
         # --- Settings ---
         settings_tab = QWidget()
@@ -302,6 +321,26 @@ class ReconstructionPanel(QWidget):
         top_row.addLayout(roi_col, stretch=1)
         details_layout.addLayout(top_row, stretch=2)
 
+        details_layout.addWidget(QLabel("All detected spots (multiple ROIs)"))
+        self.spots_table = QTableWidget(0, 8)
+        self.spots_table.setHorizontalHeaderLabels(
+            [
+                "Rank",
+                "x (cm)",
+                "y (cm)",
+                "ROI score",
+                "Thresh",
+                "Suspicion",
+                "Candidate",
+                "GT (cm)",
+            ]
+        )
+        self.spots_table.horizontalHeader().setStretchLastSection(True)
+        self.spots_table.verticalHeader().setVisible(False)
+        self.spots_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.spots_table.setMaximumHeight(180)
+        details_layout.addWidget(self.spots_table)
+
         self.assumptions_label = QLabel("No reconstruction assumptions yet.")
         self.assumptions_label.setObjectName("hintLabel")
         self.assumptions_label.setWordWrap(True)
@@ -314,17 +353,48 @@ class ReconstructionPanel(QWidget):
         details_layout.addStretch(1)
         self.content_tabs.addTab(details_tab, "Details")
 
+        tweak_tab = QWidget()
+        self.auto_tweak_tab = tweak_tab
+        tweak_layout = QVBoxLayout(tweak_tab)
+        tweak_layout.setContentsMargins(8, 16, 8, 8)
+        self.auto_tweak_notes = QLabel(
+            "Run Auto Tweak to search geometry / beamformer settings. "
+            "This table shows scores, the objective, and why a winner was kept."
+        )
+        self.auto_tweak_notes.setObjectName("hintLabel")
+        self.auto_tweak_notes.setWordWrap(True)
+        tweak_layout.addWidget(self.auto_tweak_notes)
+        self.auto_tweak_table = QTableWidget(0, 8)
+        self.auto_tweak_table.setHorizontalHeaderLabels(
+            [
+                "Mark",
+                "Beamformer",
+                "Score",
+                "GT dist (cm)",
+                "Quality",
+                "Peak",
+                "Contrast",
+                "Geometry",
+            ]
+        )
+        self.auto_tweak_table.horizontalHeader().setStretchLastSection(True)
+        self.auto_tweak_table.verticalHeader().setVisible(False)
+        self.auto_tweak_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        tweak_layout.addWidget(self.auto_tweak_table)
+        self.content_tabs.addTab(tweak_tab, "Auto Tweak")
+
         # --- Comparison ---
         comparison_tab = QWidget()
         comparison_layout = QVBoxLayout(comparison_tab)
         comparison_layout.setContentsMargins(4, 12, 4, 4)
-        self.figure = Figure(figsize=(8, 5.5), tight_layout=True)
+        self.figure = make_gui_figure(8.8, 6.4)
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.setMinimumHeight(380)
         self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         comparison_layout.addWidget(self.canvas, stretch=3)
-        self.metrics_table = QTableWidget(0, 6)
+        self.metrics_table = QTableWidget(0, 8)
         self.metrics_table.setHorizontalHeaderLabels(
-            ["Algorithm", "SNR", "SCR", "Contrast", "Time (s)", "Score"]
+            ["Algorithm", "Picked", "SNR", "SCR", "Contrast", "Score", "GT (cm)", "Why"]
         )
         self.metrics_table.horizontalHeader().setStretchLastSection(True)
         self.metrics_table.verticalHeader().setVisible(False)
@@ -338,8 +408,9 @@ class ReconstructionPanel(QWidget):
         refinement_layout_root = QHBoxLayout(refinement_tab)
         refinement_layout_root.setContentsMargins(4, 12, 4, 4)
         refinement_layout_root.setSpacing(16)
-        self.refined_figure = Figure(figsize=(8, 5.5), tight_layout=True)
+        self.refined_figure = make_gui_figure(8.0, 6.0)
         self.refined_canvas = FigureCanvasQTAgg(self.refined_figure)
+        self.refined_canvas.setMinimumHeight(360)
         self.refined_canvas.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -452,6 +523,7 @@ class ReconstructionPanel(QWidget):
     def _on_auto_finished(self, result: AutoCalibrateResult) -> None:
         self.last_auto_result = result
         self.auto_progress.setValue(100)
+        self._populate_auto_tweak(result)
         best = result.best
         dist_txt = (
             f"{best.tumor_gt_distance_m * 100:.2f} cm to GT"
@@ -470,6 +542,7 @@ class ReconstructionPanel(QWidget):
         self.run_button.setEnabled(True)
         self.auto_tweak_button.setEnabled(True)
         self.auto_progress.setVisible(False)
+        self.content_tabs.setCurrentWidget(self.auto_tweak_tab)
 
         if not result.improved:
             search = result.search_best
@@ -497,6 +570,77 @@ class ReconstructionPanel(QWidget):
             self._run_reconstruction(dataset)
         except Exception as exc:
             self._log(f"Reconstruction after auto tweak failed: {exc}", "ERROR")
+
+    def _populate_auto_tweak(self, result: AutoCalibrateResult) -> None:
+        best = result.best
+        baseline = result.baseline
+        search = result.search_best
+        if result.objective == "tumor_gt":
+            rule = (
+                "Objective: minimize ROI ↔ labeled tumor distance. "
+                "A candidate replaces the current settings only if it is at least 0.5 mm closer."
+            )
+        else:
+            rule = (
+                "Objective: maximize contrast × off-center compact ROI score "
+                "(no tumor GT). Winner must beat baseline score by > 1e-4."
+            )
+        winner_line = (
+            f"Kept: {best.beamformer} | {best.geometry.label()} | score={best.score:.4f}"
+        )
+        if best.tumor_gt_distance_m is not None:
+            winner_line += f" | GT={best.tumor_gt_distance_m * 100:.2f} cm"
+        if not result.improved:
+            winner_line += " (baseline kept — search did not beat the improvement rule)"
+        notes = " ".join(result.notes)
+        self.auto_tweak_notes.setText(
+            f"{rule}\n{winner_line}\nTrials evaluated: {len(result.trials)}. {notes}"
+        )
+
+        def _key(trial):
+            return (
+                trial.beamformer,
+                trial.geometry.label(),
+                round(trial.score, 8),
+            )
+
+        unique = []
+        seen = set()
+        ordered = sorted(result.trials, key=lambda t: t.score, reverse=True)
+        for trial in ordered:
+            key = _key(trial)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(trial)
+            if len(unique) >= 25:
+                break
+
+        self.auto_tweak_table.setRowCount(len(unique))
+        for row, trial in enumerate(unique):
+            mark = []
+            if baseline is not None and _key(trial) == _key(baseline):
+                mark.append("BASE")
+            if _key(trial) == _key(best):
+                mark.append("WIN")
+            if search is not None and _key(trial) == _key(search) and _key(trial) != _key(best):
+                mark.append("SEARCH-BEST")
+            gt = trial.tumor_gt_distance_m
+            self.auto_tweak_table.setItem(row, 0, QTableWidgetItem("+".join(mark) or ""))
+            self.auto_tweak_table.setItem(row, 1, QTableWidgetItem(trial.beamformer))
+            self.auto_tweak_table.setItem(row, 2, QTableWidgetItem(f"{trial.score:.5f}"))
+            self.auto_tweak_table.setItem(
+                row, 3, QTableWidgetItem("n/a" if gt is None else f"{gt * 100:.2f}")
+            )
+            self.auto_tweak_table.setItem(
+                row, 4, QTableWidgetItem(f"{trial.quality_score:.4f}")
+            )
+            self.auto_tweak_table.setItem(row, 5, QTableWidgetItem(f"{trial.image_peak:.4f}"))
+            self.auto_tweak_table.setItem(
+                row, 6, QTableWidgetItem(f"{trial.image_contrast:.4f}")
+            )
+            self.auto_tweak_table.setItem(row, 7, QTableWidgetItem(trial.geometry.label()))
+        self.auto_tweak_table.resizeColumnsToContents()
 
     def _apply_auto_result_to_controls(self, result: AutoCalibrateResult) -> None:
         g = result.best.geometry
@@ -545,6 +689,20 @@ class ReconstructionPanel(QWidget):
             config=config,
             return_timings=True,
         )
+        try:
+            time_signals = frequency_to_time(
+                s_params, freqs, zero_padding=config.zero_padding
+            )
+            time_s = time_axis_seconds(freqs, time_signals.shape[0])
+        except Exception as exc:
+            self._log(f"IFFT intermediate plot skipped: {exc}")
+            time_signals = None
+            time_s = None
+        self.last_time_signals = time_signals
+        self.last_time_axis = time_s
+        self.last_images = images
+        self.last_s_params = np.asarray(s_params)
+        self.last_frequencies = np.asarray(freqs)
         selected_name, quality_metrics = select_best_beamformer(
             images,
             timings,
@@ -555,13 +713,25 @@ class ReconstructionPanel(QWidget):
             prefer_off_center=prefer_off_center,
             tight_peak=tight_peak,
         )
-        roi_result = detect_roi(
+        rois = detect_rois(
             images[selected_name],
             prefer_off_center=prefer_off_center,
             tight_peak=tight_peak,
             x_span=config.x_span,
             y_span=config.y_span,
+            prior_xy_m=tumor_xy,
+            prior_weight=0.0,
+            max_rois=4,
+            min_score_ratio=0.28,
         )
+        evaluated = evaluate_rois(
+            images[selected_name],
+            rois,
+            config.x_span,
+            config.y_span,
+            tumor_xy_m=tumor_xy,
+        )
+        roi_result = evaluated.localization_roi
         refinement = reconstruct_high_resolution_roi(
             s_params,
             freqs,
@@ -572,20 +742,12 @@ class ReconstructionPanel(QWidget):
             min_grid_size=max(96, config.n_x),
         )
         self.last_roi_result = roi_result
+        self.last_roi_results = list(evaluated.rois)
         self.last_roi_refinement = refinement
 
-        centroid_m = roi_centroid_meters(
-            roi_result,
-            images[selected_name].shape,
-            config.x_span,
-            config.y_span,
-        )
-        gt_distance = None
-        if tumor_xy is not None:
-            gt_distance = float(
-                np.hypot(centroid_m[0] - tumor_xy[0], centroid_m[1] - tumor_xy[1])
-            )
-        candidate = classify_tumor_candidate(images[selected_name], roi_result)
+        centroid_m = evaluated.localization_centroid_m
+        gt_distance = None if evaluated.gt_distance_cm is None else evaluated.gt_distance_cm / 100.0
+        candidate = evaluated.combined
         characterization = characterize_tumor_region(
             images[selected_name],
             roi_result,
@@ -600,6 +762,8 @@ class ReconstructionPanel(QWidget):
             "threshold": candidate.threshold,
             "reason": candidate.reason,
             "features": dict(candidate.features),
+            "n_rois": len(evaluated.rois),
+            "spots": evaluated.spot_summaries,
         }
         confidence = assess_reconstruction_confidence(
             selected_quality=quality_metrics.get(selected_name),
@@ -616,6 +780,7 @@ class ReconstructionPanel(QWidget):
             config=config,
             quality_metrics=quality_metrics,
             roi=roi_result,
+            rois=list(evaluated.rois),
             refinement=refinement,
             tumor_xy_m=tumor_xy,
             roi_centroid_m=centroid_m,
@@ -637,7 +802,7 @@ class ReconstructionPanel(QWidget):
         self._plot_selected_image(
             images[selected_name],
             selected_name,
-            roi_result,
+            evaluated.rois,
             config.x_span,
             config.y_span,
             tumor_xy_m=tumor_xy,
@@ -645,19 +810,32 @@ class ReconstructionPanel(QWidget):
         self._plot_images(
             images,
             selected_name,
-            roi_result,
+            evaluated.rois,
             config.x_span,
             config.y_span,
             tumor_xy_m=tumor_xy,
         )
         self._plot_refined_image(refinement)
-        self._populate_summary(images, selected_name)
-        self._populate_metrics(quality_metrics)
+        self._plot_reconstruction_trace(
+            np.asarray(s_params),
+            np.asarray(freqs),
+            time_s,
+            time_signals,
+            images,
+            selected_name,
+            config.x_span,
+            config.y_span,
+        )
+        self._populate_summary(images, selected_name, dataset)
+        self._populate_metrics(quality_metrics, selected_name)
         self._populate_roi(
             roi_result,
             candidate_result=self.last_snapshot.tumor_candidate_result,
             characterization=self.last_snapshot.tumor_characterization,
             confidence=self.last_snapshot.reconstruction_confidence,
+            extra_rois=evaluated.rois,
+            spot_summaries=evaluated.spot_summaries,
+            localization_roi=evaluated.localization_roi,
         )
         self._populate_refinement(refinement)
         gt_note = ""
@@ -681,7 +859,8 @@ class ReconstructionPanel(QWidget):
         )
         self._log(
             f"Reconstruction completed. Selected beamformer: {selected_name}.{geom_note}"
-            f" ROI bbox={roi_result.bounding_box}. Refined grid={refinement.grid_shape[1]}x{refinement.grid_shape[0]}.{gt_note}{candidate_note}",
+            f" ROIs={len(evaluated.rois)} (primary bbox={evaluated.primary.bounding_box})."
+            f" Refined grid={refinement.grid_shape[1]}x{refinement.grid_shape[0]}.{gt_note}{candidate_note}",
             "SUCCESS",
         )
         self.content_tabs.setCurrentIndex(0)
@@ -706,6 +885,7 @@ class ReconstructionPanel(QWidget):
             ("selected", self.selected_figure),
             ("beamformers", self.figure),
             ("roi_refine", self.refined_figure),
+            ("trace", self.steps_figure),
         ):
             target = out / f"{basename}_{suffix}.png"
             figure.savefig(str(target), dpi=140, bbox_inches="tight")
@@ -735,7 +915,7 @@ class ReconstructionPanel(QWidget):
         if str(meta.get("dataset_family", "")).upper() == "UM-BMID":
             self.roi_mode_combo.setCurrentText("Peak score")
             self.beamformer_mode_combo.setCurrentText(
-                "Force DMAS-D4" if meta.get("bmid_has_tumor") else "Prefer DMAS-D4"
+                "Closest to tumor GT" if meta.get("bmid_has_tumor") else "Quality score"
             )
             self.span_combo.setCurrentText("12 cm x 12 cm")
             self.phase_delay_combo.setCurrentText("Off")
@@ -911,7 +1091,7 @@ class ReconstructionPanel(QWidget):
             vmax=vmax,
             extent=extent,
         )
-        ax.set_title(title)
+        ax.set_title(title, fontsize=10, pad=8)
         if extent is None:
             ax.set_xticks([])
             ax.set_yticks([])
@@ -920,11 +1100,63 @@ class ReconstructionPanel(QWidget):
             ax.set_ylabel("y (cm)")
         return im
 
+    def _overlay_rois(
+        self,
+        ax,
+        image: np.ndarray,
+        rois: list[ROIResult] | ROIResult,
+        x_span: tuple[float, float],
+        y_span: tuple[float, float],
+        tumor_xy_m: tuple[float, float] | None = None,
+        linewidth: float = 2.0,
+        show_labels: bool = True,
+    ) -> None:
+        if isinstance(rois, ROIResult):
+            rois = [rois]
+        colors = ("cyan", "yellow", "magenta", "white")
+        x_axis = np.linspace(x_span[0] * 100.0, x_span[1] * 100.0, image.shape[1])
+        y_axis = np.linspace(y_span[0] * 100.0, y_span[1] * 100.0, image.shape[0])
+        for roi in rois:
+            color = colors[(max(int(roi.rank), 1) - 1) % len(colors)]
+            x0, y0, x1, y1 = roi.bounding_box
+            rect = Rectangle(
+                (x_axis[max(0, x0)], y_axis[max(0, y0)]),
+                x_axis[min(image.shape[1] - 1, x1 - 1)] - x_axis[max(0, x0)],
+                y_axis[min(image.shape[0] - 1, y1 - 1)] - y_axis[max(0, y0)],
+                linewidth=linewidth,
+                edgecolor=color,
+                facecolor="none",
+            )
+            ax.add_patch(rect)
+            centroid_x = np.interp(roi.centroid[0], np.arange(image.shape[1]), x_axis)
+            centroid_y = np.interp(roi.centroid[1], np.arange(image.shape[0]), y_axis)
+            ax.plot(centroid_x, centroid_y, marker="o", color=color, markersize=4)
+            if show_labels:
+                ax.text(
+                    centroid_x,
+                    centroid_y,
+                    f" #{roi.rank}",
+                    color=color,
+                    fontsize=8,
+                    ha="left",
+                    va="bottom",
+                )
+        if tumor_xy_m is not None:
+            ax.plot(
+                tumor_xy_m[0] * 100.0,
+                tumor_xy_m[1] * 100.0,
+                marker="x",
+                markersize=10,
+                markeredgewidth=2.0,
+                color="lime",
+                label="Tumor GT",
+            )
+
     def _plot_selected_image(
         self,
         image: np.ndarray,
         selected_name: str,
-        roi_result: ROIResult,
+        rois: list[ROIResult] | ROIResult,
         x_span: tuple[float, float],
         y_span: tuple[float, float],
         tumor_xy_m: tuple[float, float] | None = None,
@@ -938,85 +1170,48 @@ class ReconstructionPanel(QWidget):
             x_span=x_span,
             y_span=y_span,
         )
-        x0, y0, x1, y1 = roi_result.bounding_box
-        x_axis = np.linspace(x_span[0] * 100.0, x_span[1] * 100.0, image.shape[1])
-        y_axis = np.linspace(y_span[0] * 100.0, y_span[1] * 100.0, image.shape[0])
-        rect = Rectangle(
-            (x_axis[max(0, x0)], y_axis[max(0, y0)]),
-            x_axis[min(image.shape[1] - 1, x1 - 1)] - x_axis[max(0, x0)],
-            y_axis[min(image.shape[0] - 1, y1 - 1)] - y_axis[max(0, y0)],
-            linewidth=2.0,
-            edgecolor="cyan",
-            facecolor="none",
-        )
-        ax.add_patch(rect)
-        centroid_x = np.interp(
-            roi_result.centroid[0], np.arange(image.shape[1]), x_axis
-        )
-        centroid_y = np.interp(
-            roi_result.centroid[1], np.arange(image.shape[0]), y_axis
-        )
-        ax.plot(centroid_x, centroid_y, "wo", markersize=5, label="ROI centroid")
+        self._overlay_rois(ax, image, rois, x_span, y_span, tumor_xy_m=tumor_xy_m)
         if tumor_xy_m is not None:
-            ax.plot(
-                tumor_xy_m[0] * 100.0,
-                tumor_xy_m[1] * 100.0,
-                marker="x",
-                markersize=10,
-                markeredgewidth=2.0,
-                color="lime",
-                label="Tumor GT",
-            )
             ax.legend(loc="upper right", fontsize=8)
         self.selected_figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        self.selected_figure.tight_layout()
+        finish_figure(self.selected_figure)
         self.selected_canvas.draw()
 
     def _plot_images(
         self,
         images: dict[str, np.ndarray],
         selected_name: str,
-        roi_result: ROIResult,
+        rois: list[ROIResult] | ROIResult,
         x_span: tuple[float, float],
         y_span: tuple[float, float],
         tumor_xy_m: tuple[float, float] | None = None,
     ) -> None:
         self.figure.clear()
-        titles = ["DAS", "DMAS", "DMAS-D4", f"Selected: {selected_name}"]
+        titles = [
+            f"DAS  score={self._score_text(quality_name='DAS')}",
+            f"DMAS  score={self._score_text(quality_name='DMAS')}",
+            f"DMAS-D4  score={self._score_text(quality_name='DMAS-D4')}",
+            f"Selected: {selected_name}",
+        ]
         keys = ["DAS", "DMAS", "DMAS-D4", selected_name]
-        x_axis = np.linspace(
-            x_span[0] * 100.0, x_span[1] * 100.0, images[selected_name].shape[1]
-        )
-        y_axis = np.linspace(
-            y_span[0] * 100.0, y_span[1] * 100.0, images[selected_name].shape[0]
-        )
 
         for idx, key in enumerate(keys, start=1):
             ax = self.figure.add_subplot(2, 2, idx)
             self._configure_image_axes(
                 ax, images[key], titles[idx - 1], x_span=x_span, y_span=y_span
             )
-            x0, y0, x1, y1 = roi_result.bounding_box
-            rect = Rectangle(
-                (x_axis[max(0, x0)], y_axis[max(0, y0)]),
-                x_axis[min(images[key].shape[1] - 1, x1 - 1)] - x_axis[max(0, x0)],
-                y_axis[min(images[key].shape[0] - 1, y1 - 1)] - y_axis[max(0, y0)],
+            self._overlay_rois(
+                ax,
+                images[key],
+                rois,
+                x_span,
+                y_span,
+                tumor_xy_m=tumor_xy_m,
                 linewidth=1.5,
-                edgecolor="cyan",
-                facecolor="none",
+                show_labels=True,
             )
-            ax.add_patch(rect)
-            if tumor_xy_m is not None:
-                ax.plot(
-                    tumor_xy_m[0] * 100.0,
-                    tumor_xy_m[1] * 100.0,
-                    marker="x",
-                    markersize=8,
-                    markeredgewidth=1.8,
-                    color="lime",
-                )
 
-        self.figure.tight_layout()
+        finish_figure(self.figure)
         self.canvas.draw()
 
     def _plot_refined_image(self, refinement: ROIRefinement) -> None:
@@ -1030,11 +1225,86 @@ class ReconstructionPanel(QWidget):
             y_span=refinement.y_span,
         )
         self.refined_figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        self.refined_figure.tight_layout()
+        finish_figure(self.refined_figure)
         self.refined_canvas.draw()
 
+    def _plot_reconstruction_trace(
+        self,
+        s_params,
+        freqs,
+        time_s,
+        time_signals,
+        images: dict,
+        selected_name: str,
+        x_span: tuple[float, float],
+        y_span: tuple[float, float],
+    ) -> None:
+        if s_params is None:
+            show_message(self.steps_figure, "Run reconstruction to trace S → image.")
+            self.steps_canvas.draw()
+            return
+        plot_reconstruction_trace(
+            self.steps_figure,
+            freqs,
+            s_params,
+            time_s,
+            time_signals,
+            images,
+            selected_name,
+            x_span,
+            y_span,
+            self._configure_image_axes,
+            overlay_rois=lambda ax, image: self._overlay_rois(
+                ax, image, self.last_roi_results or [], x_span, y_span
+            ),
+            scores={
+                name: float((self.last_snapshot.quality_metrics or {}).get(name, {}).get("score") or 0.0)
+                if self.last_snapshot is not None
+                else None
+                for name in images
+            },
+        )
+        self.steps_canvas.draw()
+
+    def _populate_metrics(
+        self, quality_metrics: dict[str, dict], selected_name: str | None = None
+    ) -> None:
+        self.metrics_table.setRowCount(len(quality_metrics))
+        for row, (name, metrics) in enumerate(quality_metrics.items()):
+            picked = "YES" if metrics.get("selected") or name == selected_name else ""
+            gt = metrics.get("tumor_gt_distance_m")
+            gt_txt = f"{float(gt) * 100:.2f}" if isinstance(gt, (int, float)) else "n/a"
+            why = str(metrics.get("selection_reason") or "")
+            self.metrics_table.setItem(row, 0, QTableWidgetItem(name))
+            self.metrics_table.setItem(row, 1, QTableWidgetItem(picked))
+            self.metrics_table.setItem(row, 2, QTableWidgetItem(f"{metrics['snr']:.4f}"))
+            self.metrics_table.setItem(row, 3, QTableWidgetItem(f"{metrics['scr']:.4f}"))
+            self.metrics_table.setItem(
+                row, 4, QTableWidgetItem(f"{metrics['contrast']:.4f}")
+            )
+            self.metrics_table.setItem(
+                row, 5, QTableWidgetItem(f"{metrics['score']:.4f}")
+            )
+            self.metrics_table.setItem(row, 6, QTableWidgetItem(gt_txt))
+            self.metrics_table.setItem(row, 7, QTableWidgetItem(why))
+        self.metrics_table.resizeColumnsToContents()
+
+    def _score_text(self, quality_name: str) -> str:
+        snap = self.last_snapshot
+        if snap is None:
+            return "n/a"
+        metrics = (snap.quality_metrics or {}).get(quality_name) or {}
+        score = metrics.get("score")
+        if not isinstance(score, (int, float)):
+            return "n/a"
+        picked = " ★" if quality_name == snap.selected_beamformer else ""
+        return f"{score:.3f}{picked}"
+
     def _populate_summary(
-        self, images: dict[str, np.ndarray], selected_name: str
+        self,
+        images: dict[str, np.ndarray],
+        selected_name: str,
+        dataset: MicrowaveDataset | None = None,
     ) -> None:
         selected = images[selected_name]
         mean_val = float(np.mean(selected))
@@ -1052,6 +1322,9 @@ class ReconstructionPanel(QWidget):
             "Peak Intensity": f"{peak_val:.5f}",
             "Contrast": f"{contrast:.5f}",
         }
+        if dataset is not None:
+            tax = taxonomy_from_metadata(dataset.metadata)
+            info.update({f"Taxonomy {k}": v for k, v in tax.to_display_dict().items()})
 
         self.summary_table.setRowCount(len(info))
         for row, (key, value) in enumerate(info.items()):
@@ -1059,42 +1332,39 @@ class ReconstructionPanel(QWidget):
             self.summary_table.setItem(row, 1, QTableWidgetItem(str(value)))
         self.summary_table.resizeColumnsToContents()
 
-    def _populate_metrics(self, quality_metrics: dict[str, dict[str, float]]) -> None:
-        self.metrics_table.setRowCount(len(quality_metrics))
-        for row, (name, metrics) in enumerate(quality_metrics.items()):
-            self.metrics_table.setItem(row, 0, QTableWidgetItem(name))
-            self.metrics_table.setItem(
-                row, 1, QTableWidgetItem(f"{metrics['snr']:.4f}")
-            )
-            self.metrics_table.setItem(
-                row, 2, QTableWidgetItem(f"{metrics['scr']:.4f}")
-            )
-            self.metrics_table.setItem(
-                row, 3, QTableWidgetItem(f"{metrics['contrast']:.4f}")
-            )
-            self.metrics_table.setItem(
-                row, 4, QTableWidgetItem(f"{metrics['time']:.4f}")
-            )
-            self.metrics_table.setItem(
-                row, 5, QTableWidgetItem(f"{metrics['score']:.4f}")
-            )
-        self.metrics_table.resizeColumnsToContents()
-
     def _populate_roi(
         self,
         roi_result: ROIResult,
         candidate_result: dict[str, object] | None = None,
         characterization: dict[str, float] | None = None,
         confidence: dict[str, object] | None = None,
+        extra_rois: list[ROIResult] | None = None,
+        spot_summaries: list[dict] | None = None,
+        localization_roi: ROIResult | None = None,
     ) -> None:
         x0, y0, x1, y1 = roi_result.bounding_box
+        n_spots = len(extra_rois) if extra_rois else 1
+        loc_rank = localization_roi.rank if localization_roi is not None else roi_result.rank
+        cand_threshold = None
+        if candidate_result is not None:
+            cand_threshold = candidate_result.get("threshold")
         info = {
+            "Detected spots": str(n_spots),
+            "Localization spot": f"#{loc_rank} (closest to GT if labeled, else highest score)",
             "Bounding Box": f"({x0}, {y0}) - ({x1}, {y1})",
             "Centroid (px)": f"({roi_result.centroid[0]:.1f}, {roi_result.centroid[1]:.1f})",
             "Area (px)": str(roi_result.area),
-            "Threshold": f"{roi_result.threshold:.2f}",
+            "ROI intensity threshold": f"{roi_result.threshold:.2f} (pixels ≥ this fraction of peak after smoothing)",
             "ROI Score": f"{roi_result.score:.5f}",
+            "Keep-spot score floor": "0.28 × best ROI score (weaker blobs are dropped)",
         }
+        if cand_threshold is not None:
+            info["Candidate threshold"] = (
+                f"{float(cand_threshold):.2f} (suspicion/confidence must reach this for Yes)"
+            )
+        if extra_rois:
+            for roi in extra_rois:
+                info[f"Spot #{roi.rank} score"] = f"{roi.score:.4f} @ px ({roi.centroid[0]:.1f}, {roi.centroid[1]:.1f})"
         if candidate_result:
             is_candidate = bool(candidate_result.get("is_tumor_candidate", False))
             cand_conf = float(candidate_result.get("confidence", 0.0) or 0.0)
@@ -1102,6 +1372,7 @@ class ReconstructionPanel(QWidget):
             info["Tumor Candidate"] = "Yes" if is_candidate else "No"
             info["Candidate Confidence"] = f"{cand_conf:.3f}"
             info["Suspicion Score"] = f"{suspicion:.3f}"
+            info["Candidate reason"] = str(candidate_result.get("reason") or "")
         if characterization:
             info["Centroid (cm)"] = (
                 f"({characterization.get('centroid_x_cm', 0.0):.2f}, "
@@ -1130,6 +1401,68 @@ class ReconstructionPanel(QWidget):
             self.roi_table.setItem(row, 0, QTableWidgetItem(str(key)))
             self.roi_table.setItem(row, 1, QTableWidgetItem(str(value)))
         self.roi_table.resizeColumnsToContents()
+        self._populate_spots_table(spot_summaries, extra_rois, localization_roi)
+
+    def _populate_spots_table(
+        self,
+        spot_summaries: list[dict] | None,
+        extra_rois: list[ROIResult] | None,
+        localization_roi: ROIResult | None,
+    ) -> None:
+        rows = list(spot_summaries or [])
+        if not rows and extra_rois:
+            for roi in extra_rois:
+                rows.append(
+                    {
+                        "rank": roi.rank,
+                        "centroid_cm": [None, None],
+                        "score": roi.score,
+                        "threshold": roi.threshold,
+                        "is_tumor_candidate": None,
+                        "confidence": None,
+                        "gt_distance_cm": None,
+                    }
+                )
+        loc_rank = localization_roi.rank if localization_roi is not None else None
+        self.spots_table.setRowCount(len(rows))
+        for row, item in enumerate(rows):
+            cx, cy = (item.get("centroid_cm") or [None, None])[:2]
+            cand = item.get("is_tumor_candidate")
+            if cand is True:
+                cand_txt = "Yes"
+            elif cand is False:
+                cand_txt = "No"
+            else:
+                cand_txt = "n/a"
+            mark = "LOC" if loc_rank is not None and int(item.get("rank") or 0) == int(loc_rank) else ""
+            gt = item.get("gt_distance_cm")
+            self.spots_table.setItem(row, 0, QTableWidgetItem(f"{item.get('rank')} {mark}".strip()))
+            self.spots_table.setItem(
+                row, 1, QTableWidgetItem("n/a" if cx is None else f"{float(cx):.2f}")
+            )
+            self.spots_table.setItem(
+                row, 2, QTableWidgetItem("n/a" if cy is None else f"{float(cy):.2f}")
+            )
+            self.spots_table.setItem(
+                row, 3, QTableWidgetItem(f"{float(item.get('score') or 0.0):.4f}")
+            )
+            thresh = extra_rois[row].threshold if extra_rois and row < len(extra_rois) else None
+            self.spots_table.setItem(
+                row,
+                4,
+                QTableWidgetItem("n/a" if thresh is None else f"{float(thresh):.2f}"),
+            )
+            conf = item.get("confidence")
+            self.spots_table.setItem(
+                row, 5, QTableWidgetItem("n/a" if conf is None else f"{float(conf):.3f}")
+            )
+            self.spots_table.setItem(row, 6, QTableWidgetItem(cand_txt))
+            self.spots_table.setItem(
+                row,
+                7,
+                QTableWidgetItem("n/a" if gt is None else f"{float(gt):.2f}"),
+            )
+        self.spots_table.resizeColumnsToContents()
 
     def _populate_refinement(self, refinement: ROIRefinement) -> None:
         x0, x1 = refinement.x_span
