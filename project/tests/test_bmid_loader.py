@@ -44,7 +44,7 @@ def _write_fake_bmid(folder: str) -> tuple[str, str]:
             "tum_z": -6.5 if i == 0 else np.nan,
             "birads": 1,
             "adi_ref_id": 3,
-            "emp_ref_id": 16,
+            "emp_ref_id": 3 if i == 0 else 16,
             "date": "20210801",
             "n_session": 1,
             "ant_rad": 18.0,
@@ -122,6 +122,11 @@ class TestBmidLoader(unittest.TestCase):
             self.assertAlmostEqual(ds.metadata["tumor_x_m"], 0.015, places=6)
             self.assertIn("tumor_taxonomy", ds.metadata)
             self.assertEqual(ds.metadata["tumor_taxonomy"]["size_class"], "small")
+
+            self.assertEqual(scans[0].emp_ref_id, 3)
+            self.assertTrue(ds.metadata["bmid_has_empty_reference"])
+            self.assertEqual(ds.raw["bmid_empty_reference"].shape, (1001, 8))
+            self.assertFalse(load_dataset(fd_path, scan_index=1).metadata["bmid_has_empty_reference"])
 
     @unittest.skipUnless(
         os.path.isfile(os.path.join(DATASETS_DIR, "fd_data_s21_adi.mat"))

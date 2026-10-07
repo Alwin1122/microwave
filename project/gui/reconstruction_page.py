@@ -914,9 +914,9 @@ class ReconstructionPanel(QWidget):
         meta = dataset.metadata or {}
         if str(meta.get("dataset_family", "")).upper() == "UM-BMID":
             self.roi_mode_combo.setCurrentText("Peak score")
-            self.beamformer_mode_combo.setCurrentText(
-                "Closest to tumor GT" if meta.get("bmid_has_tumor") else "Quality score"
-            )
+            # Blind default: pick from the image only. Labels are for scoring after.
+            # "Closest to tumor GT" stays in the menu as a lab-only check.
+            self.beamformer_mode_combo.setCurrentText("Quality score")
             self.span_combo.setCurrentText("12 cm x 12 cm")
             self.phase_delay_combo.setCurrentText("Off")
             self.arc_combo.setCurrentText("360°")

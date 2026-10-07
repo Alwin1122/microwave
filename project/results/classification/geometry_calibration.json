@@ -1,0 +1,305 @@
+{
+  "note": "Fair cohort-level calibration of UM-BMID imaging geometry and background removal.",
+  "generations": {
+    "gen1": {
+      "n_tumor_scans": 118,
+      "n_phantoms": 11,
+      "centre_guess_cm": 3.397624629588483,
+      "app_default_cm": 4.18071076441367,
+      "modes": {
+        "emp": {
+          "held_out_mean_cm": 3.3986285755916237,
+          "held_out_within_2cm": 0.15254237288135594,
+          "chosen_per_half": [
+            {
+              "key": "emp|phase_delay|2.70e+08",
+              "radius_mode": "phase_delay",
+              "wave_speed": 270000000.0,
+              "clockwise": true,
+              "offset_deg": 97.5,
+              "fit_error_cm": 3.1861741601149194
+            },
+            {
+              "key": "emp|nominal|3.00e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 300000000.0,
+              "clockwise": false,
+              "offset_deg": 220.0,
+              "fit_error_cm": 3.410372775562174
+            }
+          ],
+          "final_setting": {
+            "key": "emp|phase_delay|2.70e+08",
+            "radius_mode": "phase_delay",
+            "wave_speed": 270000000.0,
+            "clockwise": true,
+            "offset_deg": 97.5
+          },
+          "final_fit_error_cm": 3.319981555296648,
+          "documented_geometry_cm": 3.5288952030948852
+        },
+        "emp_rot": {
+          "held_out_mean_cm": 3.4134567384323633,
+          "held_out_within_2cm": 0.22033898305084745,
+          "chosen_per_half": [
+            {
+              "key": "emp_rot|nominal|2.70e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 270000000.0,
+              "clockwise": false,
+              "offset_deg": 330.0,
+              "fit_error_cm": 3.1008776069041937
+            },
+            {
+              "key": "emp_rot|nominal|2.70e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 270000000.0,
+              "clockwise": false,
+              "offset_deg": 292.5,
+              "fit_error_cm": 3.318125919670056
+            }
+          ],
+          "final_setting": {
+            "key": "emp_rot|nominal|2.70e+08",
+            "radius_mode": "nominal",
+            "wave_speed": 270000000.0,
+            "clockwise": false,
+            "offset_deg": 315.0
+          },
+          "final_fit_error_cm": 3.2650743428084454,
+          "documented_geometry_cm": 4.660692675039166
+        },
+        "adi": {
+          "held_out_mean_cm": 3.1941105748294323,
+          "held_out_within_2cm": 0.13559322033898305,
+          "chosen_per_half": [
+            {
+              "key": "adi|phase_delay|2.10e+08",
+              "radius_mode": "phase_delay",
+              "wave_speed": 210000000.0,
+              "clockwise": false,
+              "offset_deg": 137.5,
+              "fit_error_cm": 2.9890045828047307
+            },
+            {
+              "key": "adi|nominal|1.80e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 180000000.0,
+              "clockwise": false,
+              "offset_deg": 107.5,
+              "fit_error_cm": 3.1814521654486376
+            }
+          ],
+          "final_setting": {
+            "key": "adi|phase_delay|2.10e+08",
+            "radius_mode": "phase_delay",
+            "wave_speed": 210000000.0,
+            "clockwise": false,
+            "offset_deg": 122.5
+          },
+          "final_fit_error_cm": 3.1084965579478467,
+          "documented_geometry_cm": 3.620206080731689
+        }
+      }
+    },
+    "gen2": {
+      "n_tumor_scans": 504,
+      "n_phantoms": 66,
+      "centre_guess_cm": 3.0640665311175397,
+      "app_default_cm": 4.4908852755364,
+      "modes": {
+        "emp": {
+          "held_out_mean_cm": 3.0156174537903535,
+          "held_out_within_2cm": 0.16666666666666666,
+          "chosen_per_half": [
+            {
+              "key": "emp|nominal|2.40e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 240000000.0,
+              "clockwise": true,
+              "offset_deg": 245.0,
+              "fit_error_cm": 3.05711426538661
+            },
+            {
+              "key": "emp|nominal|2.70e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 270000000.0,
+              "clockwise": true,
+              "offset_deg": 230.0,
+              "fit_error_cm": 2.9402113811564985
+            }
+          ],
+          "final_setting": {
+            "key": "emp|nominal|2.70e+08",
+            "radius_mode": "nominal",
+            "wave_speed": 270000000.0,
+            "clockwise": true,
+            "offset_deg": 242.5
+          },
+          "final_fit_error_cm": 3.0082825842526466,
+          "documented_geometry_cm": 3.05271276927305
+        },
+        "emp_rot": {
+          "held_out_mean_cm": 3.0438744605033947,
+          "held_out_within_2cm": 0.2261904761904762,
+          "chosen_per_half": [
+            {
+              "key": "emp_rot|nominal|3.00e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 300000000.0,
+              "clockwise": true,
+              "offset_deg": 220.0,
+              "fit_error_cm": 2.944014630627223
+            },
+            {
+              "key": "emp_rot|nominal|3.00e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 300000000.0,
+              "clockwise": true,
+              "offset_deg": 227.5,
+              "fit_error_cm": 3.1579928923562197
+            }
+          ],
+          "final_setting": {
+            "key": "emp_rot|nominal|3.00e+08",
+            "radius_mode": "nominal",
+            "wave_speed": 300000000.0,
+            "clockwise": true,
+            "offset_deg": 222.5
+          },
+          "final_fit_error_cm": 3.0411632042651218,
+          "documented_geometry_cm": 3.6192501006428457
+        },
+        "adi": {
+          "held_out_mean_cm": 3.198829856220705,
+          "held_out_within_2cm": 0.26587301587301587,
+          "chosen_per_half": [
+            {
+              "key": "adi|nominal|1.80e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 180000000.0,
+              "clockwise": false,
+              "offset_deg": 137.5,
+              "fit_error_cm": 3.0015394823984214
+            },
+            {
+              "key": "adi|nominal|2.40e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 240000000.0,
+              "clockwise": true,
+              "offset_deg": 217.5,
+              "fit_error_cm": 2.792782334751283
+            }
+          ],
+          "final_setting": {
+            "key": "adi|nominal|2.40e+08",
+            "radius_mode": "nominal",
+            "wave_speed": 240000000.0,
+            "clockwise": true,
+            "offset_deg": 217.5
+          },
+          "final_fit_error_cm": 3.0017141158031224,
+          "documented_geometry_cm": 3.647129477606761
+        }
+      }
+    },
+    "gen3": {
+      "n_tumor_scans": 100,
+      "n_phantoms": 20,
+      "centre_guess_cm": 3.181980515339465,
+      "app_default_cm": 3.205638876105792,
+      "modes": {
+        "emp": {
+          "held_out_mean_cm": 2.498421077754506,
+          "held_out_within_2cm": 0.25,
+          "chosen_per_half": [
+            {
+              "key": "emp|phase_delay|2.70e+08",
+              "radius_mode": "phase_delay",
+              "wave_speed": 270000000.0,
+              "clockwise": false,
+              "offset_deg": 292.5,
+              "fit_error_cm": 2.5147199393009805
+            },
+            {
+              "key": "emp|phase_delay|2.70e+08",
+              "radius_mode": "phase_delay",
+              "wave_speed": 270000000.0,
+              "clockwise": false,
+              "offset_deg": 300.0,
+              "fit_error_cm": 2.4663158811176378
+            }
+          ],
+          "final_setting": {
+            "key": "emp|phase_delay|2.70e+08",
+            "radius_mode": "phase_delay",
+            "wave_speed": 270000000.0,
+            "clockwise": false,
+            "offset_deg": 295.0
+          },
+          "final_fit_error_cm": 2.492388411391921
+        },
+        "emp_rot": {
+          "held_out_mean_cm": 1.6343819954950687,
+          "held_out_within_2cm": 0.8,
+          "chosen_per_half": [
+            {
+              "key": "emp_rot|nominal|1.80e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 180000000.0,
+              "clockwise": true,
+              "offset_deg": 170.0,
+              "fit_error_cm": 1.5843838736641953
+            },
+            {
+              "key": "emp_rot|phase_delay|2.10e+08",
+              "radius_mode": "phase_delay",
+              "wave_speed": 210000000.0,
+              "clockwise": true,
+              "offset_deg": 170.0,
+              "fit_error_cm": 1.494925067911012
+            }
+          ],
+          "final_setting": {
+            "key": "emp_rot|phase_delay|2.10e+08",
+            "radius_mode": "phase_delay",
+            "wave_speed": 210000000.0,
+            "clockwise": true,
+            "offset_deg": 170.0
+          },
+          "final_fit_error_cm": 1.5610259680012195
+        },
+        "adi": {
+          "held_out_mean_cm": 2.943377574114233,
+          "held_out_within_2cm": 0.22,
+          "chosen_per_half": [
+            {
+              "key": "adi|nominal|1.80e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 180000000.0,
+              "clockwise": true,
+              "offset_deg": 222.5,
+              "fit_error_cm": 2.9055515021054537
+            },
+            {
+              "key": "adi|nominal|1.80e+08",
+              "radius_mode": "nominal",
+              "wave_speed": 180000000.0,
+              "clockwise": true,
+              "offset_deg": 217.5,
+              "fit_error_cm": 2.9700430530477395
+            }
+          ],
+          "final_setting": {
+            "key": "adi|nominal|1.80e+08",
+            "radius_mode": "nominal",
+            "wave_speed": 180000000.0,
+            "clockwise": true,
+            "offset_deg": 220.0
+          },
+          "final_fit_error_cm": 2.9392460543644416
+        }
+      }
+    }
+  }
+}

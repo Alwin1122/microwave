@@ -11,10 +11,12 @@ from reconstruction.dmas import (
     dmas_reconstruct,
 )
 
-# Textbook-style D4 mapping uses exponent 1/4, which over-compresses
-# UM-BMID adipose-referenced images (almost all pixels look equally bright).
-# 0.55 keeps nonlinear emphasis while preserving usable contrast for ROI.
-DEFAULT_DMAS_D4_EXPONENT = 0.55
+# Textbook D4 uses exponent 1/4. On the UM-BMID cohort sweep
+# (results/beamformer_constant_sweep.pdf) exponents from 0.10 to 0.80
+# landed within 0.01 of each other. 0.25 is that textbook value and
+# matches the peak. 0.00 scatters the spot. 0.85 and above raise
+# healthy false positives. The earlier 0.55 default was not better.
+DEFAULT_DMAS_D4_EXPONENT = 0.25
 
 
 def dmas_d4_reconstruct(
@@ -31,8 +33,8 @@ def dmas_d4_reconstruct(
 ) -> np.ndarray:
     """Reconstruct using DMAS followed by a contrast-preserving D4 map.
 
-    ``d4_exponent=0.25`` is the original compressive mapping. The project
-    default (0.55) is tuned so compact tumors stay visible against clutter.
+    ``d4_exponent=0.25`` is both the textbook fourth root and the cohort
+    average. See results/beamformer_constant_sweep.pdf.
     """
     intermediate = dmas_reconstruct(
         time_signals,

@@ -30,7 +30,8 @@ def select_best_beamformer(
     Modes:
         quality: weighted SNR / SCR / contrast / time (default).
         prefer_dmas_d4: force DMAS-D4 when present; still report quality scores.
-        tumor_gt: pick the image whose ROI is closest to tumor ground truth.
+        tumor_gt: lab-only. Pick the image whose ROI is closest to a known
+        label. Do not use this as the default detector — it peeks at the answer.
     """
     weights = weights or {
         "snr": 0.35,

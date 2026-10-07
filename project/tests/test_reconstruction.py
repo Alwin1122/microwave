@@ -147,11 +147,11 @@ class TestBeamforming(unittest.TestCase):
         error = float(np.linalg.norm(np.asarray(peak_xy) - np.asarray(target_xy)))
         self.assertLess(error, 0.01)
 
-    def test_bmid_tuned_constants_differ_from_textbook(self):
-        self.assertAlmostEqual(DEFAULT_DAS_COHERENCE_GAMMA, 0.75)
-        self.assertAlmostEqual(DEFAULT_DMAS_PAIR_EXPONENT, 0.55)
-        self.assertAlmostEqual(DEFAULT_DMAS_COHERENCE_GAMMA, 0.6)
-        self.assertAlmostEqual(DEFAULT_DMAS_D4_EXPONENT, 0.55)
+    def test_cohort_average_defaults(self):
+        self.assertAlmostEqual(DEFAULT_DAS_COHERENCE_GAMMA, 0.55)
+        self.assertAlmostEqual(DEFAULT_DMAS_PAIR_EXPONENT, 0.30)
+        self.assertAlmostEqual(DEFAULT_DMAS_COHERENCE_GAMMA, 0.0)
+        self.assertAlmostEqual(DEFAULT_DMAS_D4_EXPONENT, 0.25)
         from reconstruction.reconstruction_manager import ReconstructionConfig
 
         cfg = ReconstructionConfig()

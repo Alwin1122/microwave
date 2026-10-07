@@ -16,6 +16,7 @@ from scipy.io import loadmat
 
 from data_loader.dataset_info import MicrowaveDataset
 from data_loader.validator import validate_dataset
+from reconstruction.bmid_geometry import generation_from_path
 from utils.exceptions import CorruptedFileError, MissingVariableError
 from utils.logger import get_logger
 
@@ -56,6 +57,7 @@ class BmidScanInfo:
     ant_rad_cm: float | None
     label: str
     tum_shape: str | None = None
+    emp_ref_id: int | None = None
 
 
 class ScanSelectionRequiredError(MissingVariableError):
@@ -315,6 +317,7 @@ def list_bmid_scans(fd_file_path: str) -> list[BmidScanInfo]:
                 ant_rad_cm=ant_rad,
                 label=label,
                 tum_shape=tum_shape if has_tumor else None,
+                emp_ref_id=_safe_int(getattr(item, "emp_ref_id", np.nan)),
             )
         )
     return scans
@@ -437,6 +440,14 @@ def load_bmid_scan(fd_file_path: str, scan_index: int) -> MicrowaveDataset:
     metadata["sparameter_variable"] = variable_name
     metadata["bmid_n_scans"] = int(cube.shape[0])
     metadata["bmid_n_antennas"] = int(s_parameters.shape[1])
+    metadata["bmid_generation"] = generation_from_path(fd_file_path)
+
+    raw_extra: dict = {"bmid_scan_info": scan_info}
+    if scan_info.emp_ref_id is not None:
+        ref_index = next((s.index for s in scans if s.scan_id == scan_info.emp_ref_id), None)
+        if ref_index is not None and ref_index < cube.shape[0] and ref_index != scan_index:
+            raw_extra["bmid_empty_reference"] = np.asarray(cube[ref_index], dtype=complex)
+    metadata["bmid_has_empty_reference"] = "bmid_empty_reference" in raw_extra
 
     dataset = MicrowaveDataset(
         file_path=fd_file_path,
@@ -447,7 +458,7 @@ def load_bmid_scan(fd_file_path: str, scan_index: int) -> MicrowaveDataset:
         n_ports=int(s_parameters.shape[1]),
         available_variables=[variable_name, "bmid_metadata"],
         metadata=metadata,
-        raw={"bmid_scan_info": scan_info},
+        raw=raw_extra,
     )
     validate_dataset(dataset)
     logger.info(

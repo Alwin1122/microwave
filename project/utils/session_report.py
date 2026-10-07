@@ -256,6 +256,9 @@ def _reconstruction_section(snap: ReconstructionSnapshot) -> tuple[str, dict[str
         f"- Source: {snap.source_label}",
         f"- Selected beamformer: **{snap.selected_beamformer}**",
         f"- Selection mode: {snap.selection_mode or 'quality'}",
+        f"- How to read the figures: cyan/white **box + dot** = detected ROI; lime **X** = labeled tumor GT from metadata (not a second ROI).",
+        f"- Quality scores are comparison numbers only. Mode `tumor_gt` / Closest to tumor GT ignores those scores and picks the image whose ROI is nearest the label. If every image peaks at the origin, DAS can win even with the lowest quality score.",
+        f"- `bmid_has_tumor` / “Current case: tumour” is the **dataset label**. The algorithm YES/NO is only the Tumor candidate decision below.",
         f"- ROI mode: {'prefer off-center' if snap.prefer_off_center_roi else 'peak score'}",
         f"- Grid: {cfg.n_x} x {cfg.n_y}",
         f"- Antenna radius: {cfg.antenna_radius * 100:.1f} cm",
@@ -483,7 +486,7 @@ def _next_steps(checks: list[str], ctx: SessionReportContext) -> list[str]:
         "Re-read this report’s Data quality checks before changing code.",
         "For BMID `_adi` scans: keep wave speed 3.0e8, preprocess none/mild, and try "
         "antenna angle offset / Flip X-Y / CW before lowering c.",
-        "Use Prefer DMAS-D4 or Closest to tumor GT when quality auto-pick locks onto DAS ring clutter.",
+        "If quality auto-pick locks onto ring clutter, try Prefer DMAS-D4 or Auto Tweak. Use Closest to tumor GT only as a lab check, not as detection.",
         "Compare one tumor scan vs one healthy scan with identical reconstruction settings.",
         "Save Hamming-windowed / time-domain Module 2 exports when completing the UG Week-3 handoff.",
     ]

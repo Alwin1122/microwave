@@ -47,7 +47,7 @@ class ReconstructionConfig:
     antenna_flip_y: bool = False
     antenna_span_deg: float = 360.0
     use_bmid_phase_delay_radius: bool = False
-    # BMID-tuned beamformer constants (textbook values noted in das/dmas modules).
+    # Cohort-average beamformer constants. Textbook values are noted in das/dmas.
     das_coherence_gamma: float = DEFAULT_DAS_COHERENCE_GAMMA
     dmas_pair_exponent: float = DEFAULT_DMAS_PAIR_EXPONENT
     dmas_coherence_gamma: float = DEFAULT_DMAS_COHERENCE_GAMMA

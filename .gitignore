@@ -53,7 +53,7 @@ project/results/*_module3_handoff.*
 project/results/*_handoff.*
 
 # Root-level generated artifacts
-results/
+/results/
 
 # Local UM-BMID large cubes (too large for regular git push)
 umbmid/**/fd_data*.mat

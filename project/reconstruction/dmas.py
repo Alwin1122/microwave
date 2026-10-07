@@ -10,10 +10,11 @@ from reconstruction.das import (
 )
 
 # Textbook DMAS uses signed square-root (pair_exponent=0.5) and no extra
-# coherence weight. UM-BMID scans benefit from a slightly higher pairing
-# exponent (stronger compact-scatterer emphasis) plus a mild CF weight.
-DEFAULT_DMAS_PAIR_EXPONENT = 0.55
-DEFAULT_DMAS_COHERENCE_GAMMA = 0.6
+# coherence weight. The UM-BMID cohort sweep (results/beamformer_constant_sweep.pdf)
+# put the shared DMAS + DMAS-D4 average at pair_exponent=0.30 and
+# coherence_gamma=0. Extra coherence weight did not raise that average.
+DEFAULT_DMAS_PAIR_EXPONENT = 0.30
+DEFAULT_DMAS_COHERENCE_GAMMA = 0.0
 DEFAULT_DMAS_EPS = 1e-9
 
 
@@ -35,8 +36,8 @@ def dmas_reconstruct(
 ) -> np.ndarray:
     """Reconstruct an image using Delay-Multiply-and-Sum beamforming.
 
-    Defaults are BMID-tuned (pair_exponent=0.55, coherence_gamma=0.6).
-    Set pair_exponent=0.5 and coherence_gamma=0 for the textbook form.
+    Defaults are the cohort average (pair_exponent=0.30, coherence_gamma=0).
+    Set pair_exponent=0.5 and coherence_gamma=0 for the textbook square-root form.
     """
     if time_signals.ndim != 2:
         raise ValueError("time_signals must be 2D (time, traces).")

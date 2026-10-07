@@ -188,7 +188,8 @@ def validate_one_target(
             config=config,
             return_timings=True,
         )
-        mode = "tumor_gt" if tumor_xy is not None else "quality"
+        # Blind pick from image quality. GT is used later only to measure error.
+        mode = "quality"
         selected, quality = select_best_beamformer(
             images,
             timings,
