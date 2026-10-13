@@ -72,7 +72,7 @@ measurement data and to spot corrupted inputs early.
 1. Place `fd_data_s21_adi.mat` + `md_list_s21_adi.mat` in `datasets/` (large cubes are gitignored).  
 2. Module 1 → load cube → pick a scan.  
 3. Module 2 → **Preset: BMID pass-through** (auto-applied) → Run.  
-4. Module 3 → radius **18 cm**, FOV **12×12 cm**, `c = 3e8`, Peak ROI, Prefer/Force **DMAS-D4**.
+4. Module 3 → radius **18 cm**, FOV **12×12 cm**, `c = 2.1e8`, clutter removal **Rotational mean**, Peak ROI (auto-applied; see `docs/BMID_DEVELOPMENT_STEPS.md` Step 12).
 
 ### Touchstone `.s2p` demo (UG brief)
 

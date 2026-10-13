@@ -272,6 +272,12 @@ class ReconstructionPanel(QWidget):
         )
         self.beamformer_mode_combo.setCurrentText("Prefer DMAS-D4")
         imaging_form.addRow("Beamformer pick", self.beamformer_mode_combo)
+        self.clutter_combo = QComboBox()
+        self.clutter_combo.addItems(["None", "Rotational mean"])
+        self.clutter_combo.setToolTip(
+            "Rotational mean subtracts the response shared by all antennas (skin, antenna ring)."
+        )
+        imaging_form.addRow("Clutter removal", self.clutter_combo)
         self.auto_quick_check = QCheckBox("Quick Auto Tweak search")
         self.auto_quick_check.setChecked(True)
         imaging_form.addRow("", self.auto_quick_check)
@@ -279,7 +285,7 @@ class ReconstructionPanel(QWidget):
         self.auto_wave_check.setChecked(False)
         imaging_form.addRow("", self.auto_wave_check)
         tip = QLabel(
-            "BMID tip: radius 18 cm, FOV 12×12 cm, c = 3.0e8, Peak ROI, Prefer DMAS-D4."
+            "BMID tip: radius 18 cm, FOV 12×12 cm, c = 2.1e8, Rotational mean clutter removal, Peak ROI."
         )
         tip.setObjectName("hintLabel")
         tip.setWordWrap(True)
@@ -911,6 +917,9 @@ class ReconstructionPanel(QWidget):
         self.phase_delay_combo.setCurrentText(
             "On (BMID)" if config.use_bmid_phase_delay_radius else "Off"
         )
+        self.clutter_combo.setCurrentText(
+            "Rotational mean" if config.clutter_removal == "rotational_mean" else "None"
+        )
         meta = dataset.metadata or {}
         if str(meta.get("dataset_family", "")).upper() == "UM-BMID":
             self.roi_mode_combo.setCurrentText("Peak score")
@@ -939,6 +948,9 @@ class ReconstructionPanel(QWidget):
         )
         config.use_bmid_phase_delay_radius = (
             self.phase_delay_combo.currentText().startswith("On")
+        )
+        config.clutter_removal = (
+            "rotational_mean" if self.clutter_combo.currentText() == "Rotational mean" else "none"
         )
         return config
 

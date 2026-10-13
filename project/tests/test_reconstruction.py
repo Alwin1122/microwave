@@ -147,6 +147,21 @@ class TestBeamforming(unittest.TestCase):
         error = float(np.linalg.norm(np.asarray(peak_xy) - np.asarray(target_xy)))
         self.assertLess(error, 0.01)
 
+    def test_all_beamformers_localize_point_target_with_defaults(self):
+        freqs = np.linspace(1e9, 8e9, 401)
+        antenna_positions = build_circular_antenna_array(24, radius=0.08)
+        target_xy = (0.012, -0.008)
+        data = _make_point_target_frequency_data(freqs, antenna_positions, target_xy)
+        axis = np.linspace(-0.03, 0.03, 41)
+        images = reconstruct_all(
+            data, freqs, antenna_positions=antenna_positions,
+            x_span=(-0.03, 0.03), y_span=(-0.03, 0.03), n_x=41, n_y=41, zero_padding=3 * freqs.size,
+        )
+        for name, image in images.items():
+            peak_y, peak_x = np.unravel_index(int(np.argmax(np.abs(image))), image.shape)
+            error = np.hypot(axis[peak_x] - target_xy[0], axis[peak_y] - target_xy[1])
+            self.assertLess(error, 0.002, name)
+
     def test_cohort_average_defaults(self):
         self.assertAlmostEqual(DEFAULT_DAS_COHERENCE_GAMMA, 0.55)
         self.assertAlmostEqual(DEFAULT_DMAS_PAIR_EXPONENT, 0.30)
@@ -244,6 +259,22 @@ class TestReconstructionConfig(unittest.TestCase):
         assessment = infer_reconstruction_assessment(dataset)
         self.assertAlmostEqual(assessment.config.antenna_span_deg, 360.0)
         self.assertFalse(assessment.config.use_bmid_phase_delay_radius)
+        self.assertEqual(assessment.config.clutter_removal, "rotational_mean")
+
+    def test_rotational_mean_clutter_removal_is_applied_from_config(self):
+        from reconstruction.reconstruction_manager import ReconstructionConfig
+
+        freqs = np.linspace(1e9, 8e9, 64)
+        shared = np.exp(-2j * np.pi * freqs * 1e-9)[:, None] * np.ones((1, 8))
+        config = ReconstructionConfig(n_x=12, n_y=12, clutter_removal="rotational_mean")
+        images = reconstruct_all(shared, freqs, config=config)
+        for name, image in images.items():
+            self.assertTrue(np.allclose(image, 0.0), name)
+        config.clutter_removal = "none"
+        self.assertGreater(np.abs(reconstruct_all(shared, freqs, config=config)["DAS"]).max(), 0.0)
+        config.clutter_removal = "median"
+        with self.assertRaises(ValueError):
+            reconstruct_all(shared, freqs, config=config)
 
 
 if __name__ == "__main__":

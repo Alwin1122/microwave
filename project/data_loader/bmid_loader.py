@@ -382,7 +382,9 @@ def _metadata_dict_for_scan(fd_file_path: str, scan_index: int, scan_info: BmidS
         "frequency_variable": "synthetic_bmid_frequency_hz",
         "sparameter_variable": "fd_data",
         "antenna_radius_m": antenna_radius_m,
-        "wave_speed_m_per_s": 3e8,
+        # Effective speed in the phantom; 3e8 (air) put the image peak at the FOV edge
+        # on 100 labelled tumour scans, 2.1e8 with rotational-mean removal localised best.
+        "wave_speed_m_per_s": 2.1e8,
         "reconstruction_x_span_m": (-half_span, half_span),
         "reconstruction_y_span_m": (-half_span, half_span),
         "bmid_calibration": None,

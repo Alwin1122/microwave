@@ -175,6 +175,7 @@ def _config_with_geometry(base: ReconstructionConfig, geometry: GeometryCandidat
         antenna_flip_y=geometry.antenna_flip_y,
         antenna_span_deg=geometry.antenna_span_deg,
         use_bmid_phase_delay_radius=geometry.use_bmid_phase_delay_radius,
+        clutter_removal=base.clutter_removal,
     )
 
 

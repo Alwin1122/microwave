@@ -37,19 +37,27 @@ def gather_delayed_samples(
 ) -> np.ndarray:
     """Sample each antenna trace at the two-way delay of every image point.
 
+    ``time_signals`` is the IFFT of a band starting at ``frequencies[0]``, i.e. a
+    baseband signal. Samples are linearly interpolated in time and re-modulated
+    by exp(j*2*pi*f0*tau) so their phase matches the RF echo; coherence factor
+    and DMAS pair products depend on that phase.
+
     Returns a complex array of shape (n_traces, n_points).
     """
     n_time, n_traces = time_signals.shape
-    n_points = points.shape[0]
     travel_times = _compute_travel_times(antenna_positions, points, wave_speed=wave_speed)
     time_axis = _compute_time_axis(frequencies, n_time)
     dt = float(time_axis[1] - time_axis[0]) if n_time > 1 else 1.0
-    delayed = np.zeros((n_traces, n_points), dtype=np.complex128)
-    for ant_idx in range(n_traces):
-        idx = np.round(travel_times[ant_idx] / dt).astype(int)
-        valid = (idx >= 0) & (idx < n_time)
-        delayed[ant_idx, valid] = time_signals[idx[valid], ant_idx]
-    return delayed
+    position = travel_times / dt
+    idx = np.floor(position).astype(int)
+    frac = position - idx
+    valid = (idx >= 0) & (idx + 1 < n_time)
+    traces = np.arange(n_traces)[:, None]
+    early = time_signals[np.clip(idx, 0, n_time - 1), traces]
+    late = time_signals[np.clip(idx + 1, 0, n_time - 1), traces]
+    samples = (1.0 - frac) * early + frac * late
+    carrier = np.exp(2j * np.pi * float(frequencies[0]) * travel_times)
+    return np.where(valid, samples * carrier, 0.0).astype(np.complex128)
 
 
 def coherence_factor(delayed_samples: np.ndarray) -> np.ndarray:

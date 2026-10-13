@@ -145,7 +145,7 @@ Use these for BMID scan 0 demos and as Auto Tweak starting point:
 | Source | Processed (or Raw if preprocess skipped) |
 | Grid | 64×64 |
 | Antenna radius | 18 cm |
-| Wave speed | 3.0e8 m/s (air) |
+| Wave speed | 3.0e8 m/s (air) — superseded: 2.1e8 + rotational mean, see Step 12 |
 | FOV | 12 cm × 12 cm (±6 cm) |
 | Angle / rotation / flip | 0° / CCW / None |
 | Arc | 360° |
@@ -209,6 +209,36 @@ Metadata lists such as `md_list_s21_adi.mat` may be committed if small; the S21 
 
 ## Scoreboard summary (scan 0)
 
-Best so far remains:
+Superseded by Step 12. Scan-0-only best was:
 
 **preprocess none + c=3e8 + r=18 cm + FOV ±6 cm + DMAS-D4 + peak ROI + no geometry flips/phase-delay → ROI ↔ GT = 1.77 cm**
+
+---
+
+## Step 12 — Module 3 review: delay-sampling fix + cohort-validated BMID defaults
+
+**Bug fixed** (`reconstruction/das.py::gather_delayed_samples`): the IFFT of a 1–8 GHz sweep is baseband, but
+samples were used without re-modulation by exp(j2πf₀τ) and with nearest-sample delays. Coherence factor and
+DMAS / DMAS-D4 pair products therefore used wrong phases. Now linear interpolation + re-modulation.
+Synthetic point target: 4–6 mm peak error → on target; DAS/DMAS spot 30–40 % tighter.
+
+**Scan-0 baseline did not generalise.** Peak ↔ GT on labelled tumour scans (FOV ±6 cm, fixed sampling):
+
+| Settings | Tuning set (24 scans) median | Held-out (76 scans) median | Held-out ≤ 2 cm |
+|----------|------------------------------|----------------------------|-----------------|
+| Guess image centre | 3.18 cm | 3.18 cm | 0 % |
+| none, c = 3e8 (old default) | 8.2–8.9 cm | 4.5–8.8 cm | 0 % |
+| rotational mean, c = 2.1e8, DAS | 3.20 cm | **2.13 cm** | **41 %** |
+| rotational mean, c = 2.1e8, DMAS | 2.55 cm | 3.82 cm | 33 % |
+
+c = 1.9e8 and 2.3e8 were both worse than 2.1e8. Image peak contrast does **not** separate tumour from healthy
+scans (AUC ≈ 0.5 for every setting): the images help localise a known tumour, not detect one.
+
+**New BMID defaults:** c = **2.1e8**, clutter removal **Rotational mean** (new Module 3 control,
+`ReconstructionConfig.clutter_removal`, also used by Auto Tweak and auto-validation). Full GUI path
+(quality pick + ROI) on all 100 tumour scans:
+
+| Defaults | ROI ↔ GT median | ≤ 1.5 cm | ≤ 3 cm |
+|----------|-----------------|----------|--------|
+| old (none, 3e8) | 4.45 cm | 0 % | 8 % |
+| new (rot-mean, 2.1e8) | **1.96 cm** | 9 % | **80 %** |
