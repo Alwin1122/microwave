@@ -47,6 +47,7 @@ from preprocessing.touchstone_s21 import (
 )
 from preprocessing.week3_time_domain import (
     Week3TimeDomainResult,
+    comparable_channel_groups,
     process_week3_time_domain,
 )
 from utils.exceptions import MicrowaveFrameworkError
@@ -80,7 +81,7 @@ class PreprocessingConfig:
     calibration_method: str = "self"
     calibration_reference: Optional[np.ndarray] = None
 
-    normalization_method: str = "max"
+    normalization_method: str = "global_max"
 
     do_background_subtraction: bool = True
     background_reference: Optional[np.ndarray] = None
@@ -89,6 +90,8 @@ class PreprocessingConfig:
     artifact_kwargs: dict = field(default_factory=dict)
 
     repeated_measurements: Optional[list[MicrowaveDataset | np.ndarray]] = None
+    # Repeats deviating more than this NRMSE from the base sweep are not averaged.
+    max_repeated_sweep_nrmse: float = 0.3
     reference_dataset: Optional[MicrowaveDataset | np.ndarray] = None
     spike_detection_method: str = "hampel"
     spike_detection_kwargs: dict = field(default_factory=dict)
@@ -97,6 +100,8 @@ class PreprocessingConfig:
     # Module 2 Week 3 (Signal Preprocessing_21082026.pdf steps 10–16)
     enable_week3: bool = True
     enable_group_clutter_removal: bool = True
+    # Explicit comparable-channel groups G; None = derive from tx/rx metadata, else all channels.
+    clutter_channel_groups: Optional[list[list[int]]] = None
     enable_global_normalize: bool = True
 
 
@@ -249,7 +254,7 @@ def run_preprocessing_pipeline(
         touchstone_result = process_touchstone_s21_dataset(dataset, config)
 
         stage_outputs: dict = {
-            "Raw": touchstone_result.raw_s21.reshape(-1, 1),
+            "Raw": touchstone_result.uniform_s21.reshape(-1, 1),
             "Corrected": touchstone_result.corrected_s21.reshape(-1, 1),
             "Filtered": touchstone_result.filtered_s21.reshape(-1, 1),
             "Windowed": touchstone_result.windowed_s21.reshape(-1, 1),
@@ -431,12 +436,23 @@ def run_preprocessing_pipeline(
     week3_result: Week3TimeDomainResult | None = None
     if config.enable_week3 and current.ndim == 2 and current.shape[0] >= 2:
         try:
+            channel_groups = config.clutter_channel_groups
+            meta = dataset.metadata or {}
+            if (
+                channel_groups is None
+                and "tx_coordinates" in meta
+                and "rx_coordinates" in meta
+            ):
+                channel_groups = comparable_channel_groups(
+                    meta["tx_coordinates"], meta["rx_coordinates"]
+                ) or None
             week3_result = process_week3_time_domain(
                 dataset.frequencies,
                 current,
                 reference_filtered=None,
                 enable_clutter_removal=config.enable_group_clutter_removal,
                 enable_global_normalize=config.enable_global_normalize,
+                channel_groups=channel_groups,
             )
             stage_outputs["Time Hamming"] = week3_result.time_hamming
             if week3_result.time_clutter_removed is not None:

@@ -199,7 +199,8 @@ def _preprocessing_section(result: PreprocessingResult) -> tuple[str, dict[str, 
         else:
             checks.append("OK: interpolation not required (input spacing already uniform).")
         checks.append(
-            f"OK: raw vs filtered comparison tracked via NRMSE={result.validation_report.nrmse:.3f}."
+            f"OK: filtering change (filter input vs output) tracked via NRMSE={result.validation_report.nrmse:.3f} "
+            "— measures alteration, not reconstruction quality."
         )
         payload["validation"] = result.validation_report.to_display_dict()
 
@@ -542,7 +543,7 @@ def _save_magnitude_plot(
 
     if p.touchstone_s21_result is not None:
         freqs = np.asarray(p.touchstone_s21_result.uniform_frequencies_hz, dtype=float)
-        raw = np.asarray(p.touchstone_s21_result.raw_s21, dtype=complex)
+        raw = np.asarray(p.touchstone_s21_result.uniform_s21, dtype=complex)
         filtered = np.asarray(p.touchstone_s21_result.filtered_s21, dtype=complex)
     else:
         freqs = np.asarray(p.original_dataset.frequencies, dtype=float)
@@ -586,6 +587,53 @@ def _save_phase_plot(
     ax.set_ylabel("Phase (deg)")
     ax.grid(alpha=0.3)
     ax.legend(loc="best")
+    fig.savefig(figure_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return figure_path
+
+
+def _save_filter_comparison_plot(
+    ctx: SessionReportContext, output_dir: str, file_stub: str
+) -> str | None:
+    if ctx.preprocessing is None or ctx.preprocessing.touchstone_s21_result is None:
+        return None
+    s21 = ctx.preprocessing.touchstone_s21_result
+    if not s21.filter_comparison or s21.filter_input_s21 is None:
+        return None
+
+    freqs_ghz = np.asarray(s21.uniform_frequencies_hz, dtype=float) / 1e9
+    figure_path = os.path.join(output_dir, f"{file_stub}_filter_comparison.png")
+    fig, (ax_curve, ax_resid) = plt.subplots(2, 1, figsize=(9, 7), tight_layout=True)
+    ax_curve.plot(freqs_ghz, s21.filter_input_s21.real, color="lightgray", linewidth=1.5, label="Unfiltered")
+    for method, entry in s21.filter_comparison.items():
+        label = (
+            f"{method} {entry['settings']} — noise ÷{entry['noise_reduction']:.1f}, "
+            f"NRMSE {entry['nrmse']:.3f}"
+        )
+        ax_curve.plot(freqs_ghz, entry["filtered"].real, linewidth=1.0, label=label)
+        ax_resid.plot(
+            freqs_ghz,
+            np.abs(entry["filtered"] - s21.filter_input_s21),
+            linewidth=0.9,
+            label=method,
+        )
+    report = s21.report
+    ax_curve.plot(
+        freqs_ghz, s21.filtered_s21.real, color="black", linewidth=1.8,
+        label=f"Selected: {report.filter_used} {report.filter_parameters or ''}",
+    )
+    ax_curve.set_title(
+        f"Mild noise filters — Real(S21). Selected '{report.filter_used}' NRMSE={report.nrmse:.3f}"
+    )
+    ax_curve.set_xlabel("Frequency (GHz)")
+    ax_curve.set_ylabel("Real(S21)")
+    ax_curve.grid(alpha=0.3)
+    ax_curve.legend(loc="best", fontsize=7)
+    ax_resid.set_title("|filtered − unfiltered| (what each filter removed)")
+    ax_resid.set_xlabel("Frequency (GHz)")
+    ax_resid.set_ylabel("|ΔS21|")
+    ax_resid.grid(alpha=0.3)
+    ax_resid.legend(loc="best", fontsize=7)
     fig.savefig(figure_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
     return figure_path
@@ -696,6 +744,7 @@ def _generate_validation_figures(
     generated = [
         _save_magnitude_plot(ctx, output_dir, file_stub),
         _save_phase_plot(ctx, output_dir, file_stub),
+        _save_filter_comparison_plot(ctx, output_dir, file_stub),
         _save_time_domain_plot(ctx, output_dir, file_stub),
         _save_same_scale_beamformer_plot(ctx, output_dir, file_stub),
     ]

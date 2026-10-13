@@ -10,9 +10,10 @@ from data_loader.touchstone_loader import (
     TouchstoneHeaderInfo,
     load_touchstone_s21_trace,
 )
-from preprocessing.filtering import apply_noise_filter
+from preprocessing.filtering import apply_noise_filter, compare_noise_filters
 from preprocessing.week3_time_domain import (
     Week3TimeDomainResult,
+    hamming_window,
     process_week3_time_domain,
 )
 from utils.exceptions import InvalidFrequencyError, InvalidSParameterError
@@ -31,6 +32,9 @@ class TouchstoneS21ValidationReport:
     spike_detection_method: str
     week3_time_domain_performed: bool = False
     notes: list[str] = field(default_factory=list)
+    corrected_sample_indices: list[int] = field(default_factory=list)
+    corrected_sample_frequencies_hz: list[float] = field(default_factory=list)
+    filter_parameters: dict = field(default_factory=dict)
 
     @property
     def distortion_ratio(self) -> float:
@@ -41,6 +45,7 @@ class TouchstoneS21ValidationReport:
         notes = "; ".join(self.notes) if self.notes else "None"
         return {
             "Module 2 Filter": self.filter_used,
+            "Filter Parameters": str(self.filter_parameters or "defaults"),
             "Spike Detection": self.spike_detection_method,
             "Corrected Samples": str(self.corrected_samples),
             "Averaging Performed": "Yes" if self.averaging_performed else "No",
@@ -64,6 +69,7 @@ class TouchstoneS21ProcessingResult:
     raw_frequencies_hz: np.ndarray
     raw_s21: np.ndarray
     uniform_frequencies_hz: np.ndarray
+    uniform_s21: np.ndarray
     raw_magnitude_db: np.ndarray
     wrapped_phase_rad: np.ndarray
     wrapped_phase_deg: np.ndarray
@@ -78,6 +84,8 @@ class TouchstoneS21ProcessingResult:
     delta_f_hz: np.ndarray
     report: TouchstoneS21ValidationReport
     week3_result: Week3TimeDomainResult | None = None
+    filter_input_s21: np.ndarray | None = None
+    filter_comparison: dict[str, dict] = field(default_factory=dict)
 
 
 def _validate_frequency_and_s21_lengths(
@@ -173,7 +181,12 @@ def _interpolate_complex_trace(
 def _hampel_mask(
     values: np.ndarray, window_size: int = 3, n_sigmas: float = 3.0
 ) -> np.ndarray:
-    """Hampel detector: MAD threshold plus leave-one-out neighbour confirmation."""
+    """
+    Hampel detector: MAD threshold plus leave-one-out neighbour confirmation.
+
+    The local sigma is floored at the trace-wide noise level (robust std of first
+    differences / sqrt(2)); a 7-sample MAD alone is too unstable and flags ordinary noise.
+    """
     n = values.shape[0]
     mask = np.zeros(n, dtype=bool)
     if n == 0:
@@ -183,14 +196,21 @@ def _hampel_mask(
     n_sigmas = max(float(n_sigmas), 0.0)
     scale = 1.4826
 
+    noise_floor = 0.0
+    if n > 2:
+        diffs = np.diff(values)
+        noise_floor = (
+            scale * float(np.median(np.abs(diffs - np.median(diffs)))) / np.sqrt(2.0)
+        )
+
     for index in range(n):
         start = max(0, index - window_size)
         stop = min(n, index + window_size + 1)
         window = values[start:stop]
         median = np.median(window)
-        deviation = np.median(np.abs(window - median))
-        threshold = n_sigmas * scale * deviation
-        if deviation > 0 and abs(values[index] - median) > threshold:
+        sigma = max(scale * float(np.median(np.abs(window - median))), noise_floor)
+        threshold = n_sigmas * sigma
+        if sigma > 0 and abs(values[index] - median) > threshold:
             neighbours = np.delete(window, min(index - start, window.shape[0] - 1))
             if (
                 neighbours.size
@@ -279,7 +299,8 @@ def _correct_isolated_samples(
     method: str = "hampel",
     window_size: int = 3,
     n_sigmas: float = 3.0,
-) -> tuple[np.ndarray, int]:
+    return_indices: bool = False,
+) -> tuple[np.ndarray, int] | tuple[np.ndarray, int, np.ndarray]:
     method_key = method.lower()
     if method_key not in {"hampel", "median", "local"}:
         raise ValueError(f"Unsupported invalid-point correction method '{method}'.")
@@ -291,12 +312,15 @@ def _correct_isolated_samples(
         s21.imag, method_key, window_size=window_size, n_sigmas=n_sigmas
     )
     combined_mask = real_mask | imag_mask
-    if not np.any(combined_mask):
+    corrected_indices = np.flatnonzero(combined_mask)
+    if not corrected_indices.size:
+        if return_indices:
+            return s21.copy(), 0, corrected_indices
         return s21.copy(), 0
 
     corrected_real = s21.real.copy()
     corrected_imag = s21.imag.copy()
-    for index in np.flatnonzero(combined_mask):
+    for index in corrected_indices:
         start = max(0, index - window_size)
         stop = min(s21.shape[0], index + window_size + 1)
 
@@ -312,14 +336,17 @@ def _correct_isolated_samples(
         if neighbourhood_imag.size:
             corrected_imag[index] = np.median(neighbourhood_imag)
 
-    return corrected_real + 1j * corrected_imag, int(np.count_nonzero(combined_mask))
+    corrected = corrected_real + 1j * corrected_imag
+    if return_indices:
+        return corrected, int(corrected_indices.size), corrected_indices
+    return corrected, int(corrected_indices.size)
 
 
 def _extract_measurement_trace(
     measurement: MicrowaveDataset | np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, TouchstoneHeaderInfo | None]:
     if isinstance(measurement, MicrowaveDataset):
-        return load_touchstone_s21_trace(measurement.file_path)[:2]
+        return load_touchstone_s21_trace(measurement.file_path)
 
     array = np.asarray(measurement)
     if array.ndim != 2 or array.shape[1] != 2:
@@ -328,56 +355,142 @@ def _extract_measurement_trace(
         )
     frequencies = np.asarray(array[:, 0].real, dtype=float)
     trace = np.asarray(array[:, 1], dtype=complex)
-    return frequencies, trace
+    return frequencies, trace, None
 
 
 def _prepare_external_trace(
     measurement: MicrowaveDataset | np.ndarray,
     expected_frequencies_hz: np.ndarray,
-) -> np.ndarray | None:
-    raw_frequencies, raw_trace = _extract_measurement_trace(measurement)
+    *,
+    return_details: bool = False,
+):
+    """
+    Bring an external trace onto the target grid. With ``return_details`` returns
+    (trace | None, resampled, header); otherwise just the trace (None if out of range).
+    """
+    raw_frequencies, raw_trace, header = _extract_measurement_trace(measurement)
     _validate_frequency_and_s21_lengths(raw_frequencies, raw_trace)
     _validate_numeric_content(raw_frequencies, raw_trace)
     raw_frequencies, raw_trace = _sort_and_validate_unique_frequencies(
         raw_frequencies, raw_trace
     )
-    candidate_frequencies, candidate_trace, _ = _interpolate_complex_trace(
-        raw_frequencies, raw_trace
-    )
 
-    if candidate_frequencies.shape != expected_frequencies_hz.shape:
-        return None
-    if not np.allclose(
-        candidate_frequencies, expected_frequencies_hz, rtol=1e-9, atol=1e-3
+    def _result(trace: np.ndarray | None, resampled: bool):
+        return (trace, resampled, header) if return_details else trace
+
+    if raw_frequencies.shape == expected_frequencies_hz.shape and np.allclose(
+        raw_frequencies, expected_frequencies_hz, rtol=1e-9, atol=1e-3
     ):
-        return None
-    return candidate_trace
+        return _result(raw_trace, False)
+
+    # Resample onto the target grid only inside the measured range; never extrapolate.
+    tolerance_hz = 1e-3
+    if (
+        raw_frequencies.shape[0] < 2
+        or raw_frequencies[0] > expected_frequencies_hz[0] + tolerance_hz
+        or raw_frequencies[-1] < expected_frequencies_hz[-1] - tolerance_hz
+    ):
+        return _result(None, False)
+    real_interp = np.interp(expected_frequencies_hz, raw_frequencies, raw_trace.real)
+    imag_interp = np.interp(expected_frequencies_hz, raw_frequencies, raw_trace.imag)
+    return _result(real_interp + 1j * imag_interp, True)
+
+
+def _load_matched_reference(
+    reference_measurement: MicrowaveDataset | np.ndarray,
+    expected_frequencies_hz: np.ndarray,
+    target_header: TouchstoneHeaderInfo | None,
+    spike_method: str = "hampel",
+    spike_kwargs: dict | None = None,
+) -> tuple[np.ndarray | None, list[str]]:
+    """
+    Load the tumour-free reference and put it through the target's chain (grid,
+    isolated-sample correction). Rejects a reference with a different reference
+    impedance, since target and reference must share calibration.
+    """
+    trace, resampled, header = _prepare_external_trace(
+        reference_measurement, expected_frequencies_hz, return_details=True
+    )
+    if (
+        header is not None
+        and target_header is not None
+        and not np.isclose(
+            header.reference_impedance_ohm, target_header.reference_impedance_ohm
+        )
+    ):
+        return None, [
+            "Reference subtraction skipped: reference impedance "
+            f"{header.reference_impedance_ohm:g} ohm differs from target "
+            f"{target_header.reference_impedance_ohm:g} ohm (calibration mismatch)."
+        ]
+    if trace is None:
+        return None, [
+            "Reference subtraction skipped because the reference does not cover the target frequency range."
+        ]
+
+    notes: list[str] = []
+    if resampled:
+        notes.append(
+            "Reference was measured on a different frequency grid and was resampled onto the target grid."
+        )
+    trace, _ = _correct_isolated_samples(
+        trace, method=spike_method, **(spike_kwargs or {})
+    )
+    return trace, notes
 
 
 def _complex_average(
     base_trace: np.ndarray,
     repeated_measurements: Iterable[MicrowaveDataset | np.ndarray] | None,
     expected_frequencies_hz: np.ndarray,
+    spike_method: str = "hampel",
+    spike_kwargs: dict | None = None,
+    max_sweep_nrmse: float = 0.3,
 ) -> tuple[np.ndarray | None, bool, list[str]]:
+    """
+    Complex mean of the base sweep and the repeated sweeps (S21_bar = 1/M * sum S21^(m)).
+
+    Each repeated sweep gets the same isolated-sample correction as the base sweep.
+    Sweeps whose NRMSE against the base exceeds ``max_sweep_nrmse`` are treated as a
+    different antenna position / phantom condition and are not averaged.
+    """
     if not repeated_measurements:
         return None, False, []
 
     traces = [base_trace]
-    skipped = 0
-    for measurement in repeated_measurements:
+    out_of_range = 0
+    inconsistent: list[str] = []
+    accepted_nrmse: list[float] = []
+    for number, measurement in enumerate(repeated_measurements, start=1):
         candidate = _prepare_external_trace(measurement, expected_frequencies_hz)
         if candidate is None:
-            skipped += 1
+            out_of_range += 1
             continue
+        candidate, _ = _correct_isolated_samples(
+            candidate, method=spike_method, **(spike_kwargs or {})
+        )
+        sweep_nrmse = _nrmse(base_trace, candidate)
+        if sweep_nrmse > max_sweep_nrmse:
+            inconsistent.append(f"#{number} (NRMSE={sweep_nrmse:.3f})")
+            continue
+        accepted_nrmse.append(sweep_nrmse)
         traces.append(candidate)
 
     notes: list[str] = []
-    if skipped:
+    if out_of_range:
         notes.append(
-            f"Skipped {skipped} repeated measurement(s) because the frequency points did not match."
+            f"Skipped {out_of_range} repeated measurement(s) because they do not cover the target frequency range."
+        )
+    if inconsistent:
+        notes.append(
+            f"Skipped repeated measurement(s) {', '.join(inconsistent)}: deviation from the base sweep exceeds "
+            f"{max_sweep_nrmse:.2f}, likely a different antenna position or phantom condition."
         )
     if len(traces) == 1:
         return None, False, notes
+    notes.append(
+        f"Complex-averaged M={len(traces)} sweeps (max sweep NRMSE vs base={max(accepted_nrmse):.3f})."
+    )
     return np.mean(np.vstack(traces), axis=0), True, notes
 
 
@@ -385,6 +498,9 @@ def _complex_reference_subtraction(
     signal: np.ndarray,
     reference_measurement: MicrowaveDataset | np.ndarray | None,
     expected_frequencies_hz: np.ndarray,
+    spike_method: str = "hampel",
+    spike_kwargs: dict | None = None,
+    target_header: TouchstoneHeaderInfo | None = None,
 ) -> tuple[np.ndarray | None, bool, list[str]]:
     if reference_measurement is None:
         return (
@@ -395,19 +511,16 @@ def _complex_reference_subtraction(
             ],
         )
 
-    reference_trace = _prepare_external_trace(
-        reference_measurement, expected_frequencies_hz
+    reference_trace, notes = _load_matched_reference(
+        reference_measurement,
+        expected_frequencies_hz,
+        target_header,
+        spike_method=spike_method,
+        spike_kwargs=spike_kwargs,
     )
     if reference_trace is None:
-        return (
-            None,
-            False,
-            [
-                "Reference subtraction skipped because the reference frequency points did not match."
-            ],
-        )
-
-    return signal - reference_trace, True, []
+        return None, False, notes
+    return signal - reference_trace, True, notes
 
 
 def _normalized_copy(s21: np.ndarray) -> np.ndarray | None:
@@ -438,21 +551,23 @@ def process_touchstone_s21_dataset(
         raw_frequencies_hz, raw_s21
     )
 
-    raw_magnitude_db = 20.0 * np.log10(np.abs(raw_s21) + 1e-12)
-    wrapped_phase_rad = np.arctan2(raw_s21.imag, raw_s21.real)
-    wrapped_phase_deg = np.rad2deg(wrapped_phase_rad)
-    unwrapped_phase_deg, unwrap_adjustments = _unwrap_phase_degrees(wrapped_phase_deg)
-    unwrapped_phase_rad = np.deg2rad(unwrapped_phase_deg)
-
     uniform_frequencies_hz, uniform_raw_s21, interpolation_performed = (
         _interpolate_complex_trace(
             raw_frequencies_hz,
             raw_s21,
         )
     )
-    corrected_s21, corrected_samples = _correct_isolated_samples(
+
+    raw_magnitude_db = 20.0 * np.log10(np.abs(uniform_raw_s21) + 1e-12)
+    wrapped_phase_rad = np.arctan2(uniform_raw_s21.imag, uniform_raw_s21.real)
+    wrapped_phase_deg = np.rad2deg(wrapped_phase_rad)
+    unwrapped_phase_deg, unwrap_adjustments = _unwrap_phase_degrees(wrapped_phase_deg)
+    unwrapped_phase_rad = np.deg2rad(unwrapped_phase_deg)
+
+    corrected_s21, corrected_samples, corrected_indices = _correct_isolated_samples(
         uniform_raw_s21,
         method=getattr(config, "spike_detection_method", "hampel"),
+        return_indices=True,
         **getattr(config, "spike_detection_kwargs", {}),
     )
 
@@ -460,6 +575,9 @@ def process_touchstone_s21_dataset(
         corrected_s21,
         getattr(config, "repeated_measurements", None),
         uniform_frequencies_hz,
+        spike_method=getattr(config, "spike_detection_method", "hampel"),
+        spike_kwargs=getattr(config, "spike_detection_kwargs", {}),
+        max_sweep_nrmse=float(getattr(config, "max_repeated_sweep_nrmse", 0.3)),
     )
     working_signal = averaged_s21 if averaged_s21 is not None else corrected_s21
 
@@ -477,14 +595,16 @@ def process_touchstone_s21_dataset(
                 "Reference subtraction deferred to Week 3; no reference file supplied."
             )
         else:
-            reference_trace = _prepare_external_trace(
-                reference_dataset, uniform_frequencies_hz
+            reference_trace, matched_notes = _load_matched_reference(
+                reference_dataset,
+                uniform_frequencies_hz,
+                header,
+                spike_method=getattr(config, "spike_detection_method", "hampel"),
+                spike_kwargs=getattr(config, "spike_detection_kwargs", {}),
             )
-            if reference_trace is None:
-                reference_notes.append(
-                    "Week 3 matched reference skipped because the reference frequency points did not match."
-                )
-            else:
+            reference_notes.extend(matched_notes)
+            if reference_trace is not None:
+                # Same filter as the target; matched Hamming happens in Week 3.
                 reference_filtered_for_week3 = apply_noise_filter(
                     reference_trace.reshape(-1, 1),
                     method=config.filter_method,
@@ -496,6 +616,9 @@ def process_touchstone_s21_dataset(
                 working_signal,
                 reference_dataset,
                 uniform_frequencies_hz,
+                spike_method=getattr(config, "spike_detection_method", "hampel"),
+                spike_kwargs=getattr(config, "spike_detection_kwargs", {}),
+                target_header=header,
             )
         )
         working_signal = (
@@ -510,7 +633,8 @@ def process_touchstone_s21_dataset(
         **config.filter_kwargs,
     )
     filtered_s21 = filtered_2d[:, 0]
-    windowed_s21 = filtered_s21 * np.hamming(filtered_s21.shape[0])
+    filter_comparison = compare_noise_filters(working_signal)
+    windowed_s21 = filtered_s21 * hamming_window(filtered_s21.shape[0])
     normalized_s21 = (
         _normalized_copy(filtered_s21)
         if getattr(config, "generate_normalized_copy", True)
@@ -541,7 +665,8 @@ def process_touchstone_s21_dataset(
 
     delta_f_hz = np.diff(uniform_frequencies_hz)
     spike_method = str(getattr(config, "spike_detection_method", "hampel"))
-    nrmse = _nrmse(corrected_s21, filtered_s21)
+    # NRMSE isolates the filtering change: filter output vs the exact filter input (S21_bar).
+    nrmse = _nrmse(working_signal, filtered_s21)
     notes = []
     notes.extend(averaging_notes)
     notes.extend(reference_notes)
@@ -553,12 +678,20 @@ def process_touchstone_s21_dataset(
         notes.append(
             f"NRMSE={nrmse:.3f} exceeds 0.75; processed curve may be over-smoothed — reduce filter strength."
         )
+    corrected_frequencies_hz = uniform_frequencies_hz[corrected_indices]
     if corrected_samples == 0:
         notes.append("No isolated invalid points required correction.")
+    else:
+        listed = ", ".join(f"{f / 1e9:.4f}" for f in corrected_frequencies_hz[:10])
+        more = f" (+{corrected_samples - 10} more)" if corrected_samples > 10 else ""
+        notes.append(f"Corrected isolated samples at GHz: {listed}{more}.")
 
     report = TouchstoneS21ValidationReport(
         filter_used=config.filter_method,
+        filter_parameters=dict(getattr(config, "filter_kwargs", {}) or {}),
         corrected_samples=corrected_samples,
+        corrected_sample_indices=corrected_indices.tolist(),
+        corrected_sample_frequencies_hz=corrected_frequencies_hz.tolist(),
         averaging_performed=averaging_performed,
         reference_subtraction_performed=reference_subtraction_performed,
         interpolation_performed=interpolation_performed,
@@ -575,6 +708,7 @@ def process_touchstone_s21_dataset(
         raw_frequencies_hz=raw_frequencies_hz,
         raw_s21=raw_s21,
         uniform_frequencies_hz=uniform_frequencies_hz,
+        uniform_s21=uniform_raw_s21,
         raw_magnitude_db=raw_magnitude_db,
         wrapped_phase_rad=wrapped_phase_rad,
         wrapped_phase_deg=wrapped_phase_deg,
@@ -589,4 +723,6 @@ def process_touchstone_s21_dataset(
         delta_f_hz=delta_f_hz,
         report=report,
         week3_result=week3_result,
+        filter_input_s21=working_signal,
+        filter_comparison=filter_comparison,
     )

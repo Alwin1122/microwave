@@ -38,11 +38,18 @@ class Week3TimeDomainResult:
     clutter_removal_performed: bool
     notes: list[str] = field(default_factory=list)
 
+    @property
+    def time_resolution_s(self) -> float:
+        """Approximate time resolution δt ≈ 1/B."""
+        return 1.0 / self.bandwidth_hz if self.bandwidth_hz > 0 else float("nan")
+
     def to_display_dict(self) -> dict:
         return {
             "Week3 Δf (Hz)": f"{self.delta_f_hz:.6g}",
             "Week3 Δt (s)": f"{self.delta_t_s:.6g}",
             "Week3 Bandwidth (Hz)": f"{self.bandwidth_hz:.6g}",
+            "Week3 T_period (s)": f"{self.period_s:.6g}",
+            "Week3 δt≈1/B (s)": f"{self.time_resolution_s:.6g}",
             "Week3 Time Samples": str(self.time_s.shape[0]),
             "Matched Hamming Window": "Yes"
             if self.matched_windowing_performed
@@ -114,18 +121,72 @@ def ifft_to_time(
 
 
 def group_mean_clutter_removal(
-    time_signals: np.ndarray, axis: int = -1
+    time_signals: np.ndarray,
+    axis: int = -1,
+    groups: list[list[int]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    μ_G[n] = mean_p s_p[n];  s_clean = s - μ_G  (Hammouch / Blanco-Angulo style).
+    μ_G[n] = (1/P) Σ_{p∈G} s_p[n];  s_p,clean = s_p - μ_G  (Hammouch / Blanco-Angulo style).
 
-    `time_signals` shape (n_time, n_channels) when axis=-1.
+    `time_signals` shape (n_time, n_channels) when axis=-1. Without ``groups`` all
+    channels form one group. With ``groups`` each group gets its own μ_G (returned
+    as columns of shape (n_time, n_groups)); channels outside any group, or in a
+    group with fewer than two channels, are left unchanged.
     """
     if time_signals.ndim == 1:
         return time_signals.copy(), time_signals.copy()
 
-    mu = np.mean(time_signals, axis=axis, keepdims=True)
-    return time_signals - mu, np.squeeze(mu, axis=axis)
+    if groups is None:
+        mu = np.mean(time_signals, axis=axis, keepdims=True)
+        return time_signals - mu, np.squeeze(mu, axis=axis)
+
+    moved = np.moveaxis(time_signals, axis, -1)
+    cleaned = moved.copy()
+    means = np.zeros(moved.shape[:-1] + (len(groups),), dtype=moved.dtype)
+    for g, members in enumerate(groups):
+        members = list(members)
+        if len(members) < 2:
+            continue
+        mu = np.mean(moved[..., members], axis=-1, keepdims=True)
+        cleaned[..., members] = moved[..., members] - mu
+        means[..., g] = mu[..., 0]
+    return np.moveaxis(cleaned, -1, axis), means
+
+
+def comparable_channel_groups(
+    tx_coordinates: np.ndarray,
+    rx_coordinates: np.ndarray,
+    rel_tol: float = 0.02,
+    centre: np.ndarray | None = None,
+) -> list[list[int]]:
+    """
+    Group channels that share geometry: same Tx–Rx separation and same mean
+    distance of Tx/Rx from the array centre (within ``rel_tol`` of the array
+    radius). All positions of a monostatic ring form a single group.
+
+    ``centre`` defaults to the origin, the convention for array coordinates here;
+    a centroid of the used positions is biased when only part of the ring is used.
+    """
+    tx = np.asarray(tx_coordinates, dtype=float)
+    rx = np.asarray(rx_coordinates, dtype=float)
+    if tx.shape != rx.shape or tx.ndim != 2 or tx.shape[0] == 0:
+        return []
+    centre = np.zeros(tx.shape[1]) if centre is None else np.asarray(centre, dtype=float)
+    separation = np.linalg.norm(tx - rx, axis=1)
+    radius = 0.5 * (np.linalg.norm(tx - centre, axis=1) + np.linalg.norm(rx - centre, axis=1))
+    scale = max(float(np.max(radius)), 1e-12) * rel_tol
+
+    groups: list[list[int]] = []
+    keys: list[tuple[float, float]] = []
+    for index in range(tx.shape[0]):
+        for g, (sep, rad) in enumerate(keys):
+            if abs(separation[index] - sep) <= scale and abs(radius[index] - rad) <= scale:
+                groups[g].append(index)
+                break
+        else:
+            keys.append((separation[index], radius[index]))
+            groups.append([index])
+    return groups
 
 
 def global_normalize(
@@ -166,6 +227,7 @@ def process_week3_time_domain(
     reference_filtered: np.ndarray | None = None,
     enable_clutter_removal: bool = True,
     enable_global_normalize: bool = True,
+    channel_groups: list[list[int]] | None = None,
 ) -> Week3TimeDomainResult:
     """
     Week 3 path on filtered complex S21 (freq × channels or 1D).
@@ -230,12 +292,31 @@ def process_week3_time_domain(
 
     time_clutter = None
     clutter_done = False
-    if enable_clutter_removal and n_channels >= 2:
-        time_clutter, _ = group_mean_clutter_removal(working_time, axis=1)
+    groups = channel_groups
+    if groups is None and n_channels >= 2:
+        groups = [list(range(n_channels))]
+    if groups is not None:
+        invalid = [i for g in groups for i in g if not 0 <= int(i) < n_channels]
+        if invalid:
+            raise ValueError(f"Clutter channel group indices out of range: {invalid}")
+    usable_groups = [g for g in (groups or []) if len(g) >= 2]
+
+    if enable_clutter_removal and usable_groups:
+        time_clutter, _ = group_mean_clutter_removal(
+            working_time, axis=1, groups=usable_groups
+        )
         clutter_done = True
+        sizes = ", ".join(str(len(g)) for g in usable_groups)
+        covered = sum(len(g) for g in usable_groups)
+        note = f"Group-mean clutter removed over {len(usable_groups)} group(s) (P = {sizes})"
+        if covered < n_channels:
+            note += f"; {n_channels - covered} channel(s) without a comparable partner left unchanged"
+        if channel_groups is None:
+            note += "; all channels assumed geometrically comparable"
+        notes.append(note + ".")
     else:
         time_clutter = working_time.copy()
-        if enable_clutter_removal and n_channels < 2:
+        if enable_clutter_removal:
             notes.append(
                 "Group-mean clutter removal skipped (need ≥2 comparable channels)."
             )

@@ -66,6 +66,7 @@ from preprocessing.preprocessing_pipeline import (
     run_preprocessing_pipeline,
 )
 from reconstruction.ifft import frequency_to_time, time_axis_seconds
+from gui.module2_step_plots import STEP_TITLES as MODULE2_STEP_TITLES, plot_module2_step
 from gui.plotting import finish_figure, make_gui_figure, plot_complex_matrix, plot_freq_to_time, show_message
 from utils.exceptions import MicrowaveFrameworkError
 from utils.logger import StatusLog, get_logger
@@ -204,6 +205,24 @@ class PreprocessingPanel(QWidget):
         stages_layout.addWidget(self.stages_canvas, stretch=3)
         self.workspace_tabs.addTab(stages_page, "Stages")
 
+        steps_page = QWidget()
+        steps_layout = QHBoxLayout(steps_page)
+        steps_layout.setContentsMargins(4, 12, 4, 4)
+        steps_side = QVBoxLayout()
+        steps_side.addWidget(QLabel("Module 2 brief: click a step (1–16)"))
+        self.step_list = QListWidget()
+        self.step_list.addItems(MODULE2_STEP_TITLES)
+        self.step_list.currentRowChanged.connect(self._on_module2_step_selected)
+        steps_side.addWidget(self.step_list)
+        steps_layout.addLayout(steps_side, stretch=1)
+        self.steps_figure = make_gui_figure(8.5, 6.2)
+        self.steps_canvas = FigureCanvasQTAgg(self.steps_figure)
+        self.steps_canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        steps_layout.addWidget(self.steps_canvas, stretch=3)
+        self.workspace_tabs.addTab(steps_page, "Module 2 Steps")
+
         # --- Settings ---
         settings_page = QWidget()
         settings_page.setAutoFillBackground(True)
@@ -232,7 +251,11 @@ class PreprocessingPanel(QWidget):
         self.calibration_combo.addItems(["none", "self"])
         basics_form.addRow("Calibration", self.calibration_combo)
         self.normalization_combo = QComboBox()
-        self.normalization_combo.addItems(["none", "max", "minmax", "zscore"])
+        self.normalization_combo.addItems(["none", "global_max", "max", "minmax", "zscore"])
+        self.normalization_combo.setToolTip(
+            "global_max: one scale for all channels (keeps relative amplitude). "
+            "max / minmax / zscore: per channel — erase amplitude differences between antennas."
+        )
         basics_form.addRow("Normalization", self.normalization_combo)
         self.background_combo = QComboBox()
         self.background_combo.addItems(["disabled", "enabled"])
@@ -568,6 +591,7 @@ class PreprocessingPanel(QWidget):
         self._populate_summary(result)
         self._plot_result(result)
         self._load_stage_list(result)
+        self._on_module2_step_selected(max(self.step_list.currentRow(), 0))
         self.workspace_tabs.setCurrentIndex(1)
         self.run_button.setEnabled(True)
         self.export_button.setEnabled(True)
@@ -601,7 +625,10 @@ class PreprocessingPanel(QWidget):
             written = export_module3_handover(
                 self.last_result, mat_path, csv_path=csv_path
             )
-            self._log(f"Exported Module 3 handoff: {written} (+ CSV + JSON params)")
+            self._log(
+                f"Exported Module 3 handoff: {written} (+ CSV, validation plots, JSON report "
+                "with parameters, checks and code version)"
+            )
             QMessageBox.information(
                 self,
                 "Export Complete",
@@ -697,33 +724,32 @@ class PreprocessingPanel(QWidget):
         self.figure.clear()
 
         touchstone = result.touchstone_s21_result
-        raw_freqs_ghz = touchstone.raw_frequencies_hz / 1e9
         uniform_freqs_ghz = touchstone.uniform_frequencies_hz / 1e9
 
         # Brief items 12–13: raw |S21| dB, wrapped phase, real, imag BEFORE preprocess
         ax1 = self.figure.add_subplot(3, 2, 1)
-        ax1.plot(raw_freqs_ghz, touchstone.raw_magnitude_db, color="tab:blue")
+        ax1.plot(uniform_freqs_ghz, touchstone.raw_magnitude_db, color="tab:blue")
         ax1.set_title("Before — |S21| (dB)")
         ax1.set_xlabel("Frequency (GHz)")
         ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True, alpha=0.3)
 
         ax2 = self.figure.add_subplot(3, 2, 2)
-        ax2.plot(raw_freqs_ghz, touchstone.wrapped_phase_deg, color="tab:purple")
+        ax2.plot(uniform_freqs_ghz, touchstone.wrapped_phase_deg, color="tab:purple")
         ax2.set_title("Before — Wrapped Phase")
         ax2.set_xlabel("Frequency (GHz)")
         ax2.set_ylabel("Phase (deg)")
         ax2.grid(True, alpha=0.3)
 
         ax3 = self.figure.add_subplot(3, 2, 3)
-        ax3.plot(raw_freqs_ghz, touchstone.raw_s21.real, color="tab:green")
+        ax3.plot(uniform_freqs_ghz, touchstone.uniform_s21.real, color="tab:green")
         ax3.set_title("Before — Real(S21)")
         ax3.set_xlabel("Frequency (GHz)")
         ax3.set_ylabel("Real(S21)")
         ax3.grid(True, alpha=0.3)
 
         ax4 = self.figure.add_subplot(3, 2, 4)
-        ax4.plot(raw_freqs_ghz, touchstone.raw_s21.imag, color="tab:red")
+        ax4.plot(uniform_freqs_ghz, touchstone.uniform_s21.imag, color="tab:red")
         ax4.set_title("Before — Imag(S21)")
         ax4.set_xlabel("Frequency (GHz)")
         ax4.set_ylabel("Imag(S21)")
@@ -731,10 +757,10 @@ class PreprocessingPanel(QWidget):
 
         ax5 = self.figure.add_subplot(3, 2, 5)
         ax5.plot(
-            raw_freqs_ghz, touchstone.wrapped_phase_deg, label="Wrapped", alpha=0.8
+            uniform_freqs_ghz, touchstone.wrapped_phase_deg, label="Wrapped", alpha=0.8
         )
         ax5.plot(
-            raw_freqs_ghz, touchstone.unwrapped_phase_deg, label="Unwrapped", alpha=0.8
+            uniform_freqs_ghz, touchstone.unwrapped_phase_deg, label="Unwrapped", alpha=0.8
         )
         ax5.set_title("Phase Unwrap")
         ax5.set_xlabel("Frequency (GHz)")
@@ -800,6 +826,16 @@ class PreprocessingPanel(QWidget):
             self.stage_list.setCurrentRow(0)
         self.stage_list.blockSignals(False)
         self._on_stage_selected(self.stage_list.currentItem().text() if self.stage_list.currentItem() else "")
+
+    def _on_module2_step_selected(self, row: int) -> None:
+        if row < 0:
+            return
+        if self.step_list.currentRow() != row:
+            self.step_list.blockSignals(True)
+            self.step_list.setCurrentRow(row)
+            self.step_list.blockSignals(False)
+        plot_module2_step(self.steps_figure, row, self.last_result)
+        self.steps_canvas.draw()
 
     def _on_stage_selected(self, name: str) -> None:
         result = self.last_result

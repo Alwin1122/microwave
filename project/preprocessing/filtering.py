@@ -55,25 +55,36 @@ def _apply_along_freq(s_params: np.ndarray, func) -> np.ndarray:
 def moving_average_filter(s_params: np.ndarray, window_size: int = 5) -> np.ndarray:
     """
     Purpose:
-        Smooth S-parameter traces with a simple centered moving average,
-        reducing high-frequency measurement noise.
+        Smooth S-parameter traces with a centered moving average,
+        R_f[k] = 1/L * sum_{r=-q..q} R[k+r] (same for I), L = 2q + 1.
     Input:
         s_params (np.ndarray): complex S-parameters, shape (n_freq, ...).
-        window_size (int): number of samples averaged (must be >= 1, odd
-            values are recommended for a symmetric window).
+        window_size (int): filter length L. Even values are rounded up to
+            the next odd value so the window stays centred.
     Output:
         np.ndarray: filtered S-parameters, same shape as input.
+    Edge handling:
+        The trace is mirror-padded by q samples at each end (numpy
+        'reflect', edge sample not repeated), so every output sample is a
+        full L-point average and edges are not biased towards zero.
     """
-    if s_params.shape[0] == 0:
+    n_freq = s_params.shape[0]
+    if n_freq == 0:
         raise InvalidSParameterError("Cannot filter an empty S-parameter array.")
-    window_size = max(1, min(window_size, s_params.shape[0]))
+    window_size = max(1, int(window_size))
+    if window_size % 2 == 0:
+        window_size += 1
+    max_odd = n_freq if n_freq % 2 == 1 else n_freq - 1
+    window_size = min(window_size, max(1, max_odd))
     if window_size == 1:
         return s_params.copy()
 
+    half = window_size // 2
     kernel = np.ones(window_size) / window_size
 
     def _conv(x: np.ndarray) -> np.ndarray:
-        return np.convolve(x, kernel, mode="same")
+        padded = np.pad(x, half, mode="reflect")
+        return np.convolve(padded, kernel, mode="valid")
 
     logger.info(f"Applying moving-average filter (window={window_size})")
     return _apply_along_freq(s_params, _conv)
@@ -209,6 +220,55 @@ def median_smoothing_filter(s_params: np.ndarray, kernel_size: int = 5) -> np.nd
 
     logger.info(f"Applying median smoothing filter (kernel_size={kernel_size})")
     return _apply_along_freq(s_params, lambda x: medfilt(x, kernel_size=kernel_size))
+
+
+MILD_FILTER_SETTINGS: dict[str, dict] = {
+    "moving_average": {"window_size": 5},
+    "gaussian": {"sigma": 1.0},
+    "median": {"kernel_size": 5},
+    "savgol": {"window_length": 7, "polyorder": 3},
+    "butterworth": {"cutoff": 0.3, "order": 4},
+}
+
+
+def _difference_noise_sigma(trace: np.ndarray) -> float:
+    """Robust point-to-point noise estimate: 1.4826 * MAD(diff) / sqrt(2), real+imag combined."""
+    if trace.shape[0] < 3:
+        return 0.0
+    parts = []
+    for component in (trace.real, trace.imag):
+        d = np.diff(component)
+        parts.append(1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0))
+    return float(np.hypot(*parts))
+
+
+def compare_noise_filters(
+    s21: np.ndarray, settings: dict[str, dict] | None = None
+) -> dict[str, dict]:
+    """
+    Apply every mild filter with identical, fixed settings to one complex
+    S21 trace and report, per filter:
+      - filtered: complex filtered trace
+      - noise_sigma: point-to-point noise left after filtering
+      - noise_reduction: input noise_sigma / filtered noise_sigma
+      - nrmse: ||filtered - input|| / ||input|| (how much the curve moved)
+    """
+    trace = np.asarray(s21, dtype=complex).reshape(-1)
+    settings = settings or MILD_FILTER_SETTINGS
+    input_noise = _difference_noise_sigma(trace)
+    norm = float(np.linalg.norm(trace))
+    results: dict[str, dict] = {}
+    for method, kwargs in settings.items():
+        filtered = apply_noise_filter(trace.reshape(-1, 1), method=method, **kwargs)[:, 0]
+        noise = _difference_noise_sigma(filtered)
+        results[method] = {
+            "settings": dict(kwargs),
+            "filtered": filtered,
+            "noise_sigma": noise,
+            "noise_reduction": input_noise / noise if noise > 0 else float("inf"),
+            "nrmse": float(np.linalg.norm(filtered - trace) / norm) if norm > 0 else 0.0,
+        }
+    return results
 
 
 def apply_noise_filter(

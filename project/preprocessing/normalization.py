@@ -18,13 +18,17 @@ Description:
     preserving phase, since phase carries the propagation-delay
     information required for later time-domain conversion and image
     reconstruction.
-    Three strategies are provided:
+    Strategies:
+      - Global max (default): every trace divided by ONE α = max over all
+        channels and samples. Preserves relative amplitude between
+        channels, which DAS/DMAS rely on.
       - Min-max normalization: magnitude rescaled to [0, 1] per trace.
       - Z-score normalization: magnitude rescaled to zero mean, unit
         variance per trace.
       - Max-magnitude normalization: each trace divided by its own peak
-        magnitude (classic radar/UWB convention, preserves relative shape
-        across frequency).
+        magnitude.
+    The per-trace methods normalize each channel independently and erase
+    inter-channel amplitude differences; avoid them for imaging.
 """
 
 from __future__ import annotations
@@ -117,20 +121,42 @@ def max_magnitude_normalization(s_params: np.ndarray) -> np.ndarray:
     return s_params / peak_safe
 
 
-def apply_normalization(s_params: np.ndarray, method: str = "max") -> np.ndarray:
+def global_max_normalization(s_params: np.ndarray) -> np.ndarray:
+    """
+    Purpose:
+        Divide all traces by one α = max |S| over every channel and sample,
+        so relative amplitude between channels is preserved.
+    Input:
+        s_params (np.ndarray): complex S-parameters, shape (n_freq, ...).
+    Output:
+        np.ndarray: normalized S-parameters, same shape.
+    """
+    if s_params.size == 0:
+        raise InvalidSParameterError("Cannot normalize an empty S-parameter array.")
+
+    alpha = float(np.max(np.abs(s_params)))
+    if alpha < _EPS:
+        return s_params.copy()
+    logger.info(f"Applying global max normalization (alpha={alpha:.6g})")
+    return s_params / alpha
+
+
+def apply_normalization(s_params: np.ndarray, method: str = "global_max") -> np.ndarray:
     """
     Purpose:
         Dispatch to the requested normalization strategy for the
         preprocessing pipeline.
     Input:
         s_params (np.ndarray): complex S-parameters.
-        method (str): 'minmax', 'zscore', 'max', or 'none'.
+        method (str): 'global_max', 'minmax', 'zscore', 'max' (per trace), or 'none'.
     Output:
         np.ndarray: normalized S-parameters.
     """
     method = method.lower()
     if method in ("none", "off", "disabled"):
         return s_params.copy()
+    if method in ("global_max", "global", "global-max"):
+        return global_max_normalization(s_params)
     if method in ("minmax", "min-max", "min_max"):
         return minmax_normalization(s_params)
     if method in ("zscore", "z-score", "z_score"):
