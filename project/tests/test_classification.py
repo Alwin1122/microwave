@@ -4,12 +4,12 @@ import unittest
 
 import numpy as np
 
-from classification.features import calibrate_empty, image_features, signal_features
+from classification.features import BREAST_T_START_S, calibrate_empty, image_features, signal_features
 from classification.models import binary_metrics, grouped_folds, select_columns, size_class
 from classification.predict import predict_from_features
 from data_loader.bmid_loader import bmid_frequencies_hz
 from reconstruction.bmid_geometry import generation_from_path, remove_low_rank, remove_rotational_mean, time_gate
-from tools.build_classification_features import attach_twins
+from tools.build_classification_features import attach_twins, fair_twins
 from reconstruction.das import das_coherent_from_frequency
 from reconstruction.reconstruction_manager import build_circular_antenna_array
 from tools.train_tumor_models import balanced_fair_mask
@@ -45,6 +45,18 @@ class TestSignalFeatures(unittest.TestCase):
         feats = signal_features(self.raw, calibrate_empty(self.raw, 0.9 * self.raw), self.freqs)
         self.assertTrue(all(np.isfinite(value) for value in feats.values()))
         self.assertEqual(sum(name.startswith("sig_band") for name in feats), 21)
+
+    def test_breast_window_keeps_the_tumour_echo_and_drops_the_antenna(self):
+        early = np.exp(-2j * np.pi * self.freqs * 0.3e-9)
+        late = np.exp(-2j * np.pi * self.freqs * 2.0e-9)
+        antenna = np.repeat(early[:, None], 8, axis=1)
+        tumour = np.repeat(late[:, None], 8, axis=1)
+        tumour = tumour.copy()
+        tumour[:, 3] *= 3.0
+        early_energy = 10 ** signal_features(antenna, antenna, self.freqs)["sig_win_log"]
+        late_energy = 10 ** signal_features(tumour, tumour, self.freqs)["sig_win_log"]
+        self.assertGreater(late_energy, 10.0 * early_energy)
+        self.assertGreater(BREAST_T_START_S, 0.3e-9)
 
 
 class TestImageFeatures(unittest.TestCase):
@@ -128,6 +140,17 @@ class TestCoherentDasAndGeometry(unittest.TestCase):
             self.assertNotIn(record["index"], record["twin_indices"])
             self.assertTrue(set(record["twin_indices"]) <= {1, 2, 3, 4})
             self.assertEqual(len(record["twin_indices"]), 3)
+
+    def test_fair_twins_use_the_same_count_for_both_classes(self):
+        records = [
+            {"index": i, "scan_id": i + 1, "phant_id": "P", "n_session": 1.0, "group": g}
+            for i, g in enumerate(["tumor", "healthy_fib", "healthy_fib"])
+        ]
+        kept = fair_twins(records, cap=3)
+        self.assertEqual(sorted(r["index"] for r in kept), [0, 1, 2])
+        self.assertTrue(all(len(r["twin_indices"]) == 1 for r in kept))
+        tumor = next(r for r in kept if r["index"] == 0)
+        self.assertTrue(set(tumor["twin_indices"]) <= {1, 2})
 
     def test_generation_from_path(self):
         self.assertEqual(generation_from_path("x/fd_data_gen_two_s11.mat"), "gen2")

@@ -64,10 +64,10 @@ from roi.roi_detector import (  # noqa: E402
     tumor_likelihood_features,
 )
 
-OUT_DIR = PROJECT / "results" / "beamformer_sweep"
-MD_PATH = PROJECT / "results" / "beamformer_constant_sweep_detailed.md"
-PDF_PATH = PROJECT / "results" / "beamformer_constant_sweep_detailed.pdf"
-SIMPLE_PDF_PATH = PROJECT / "results" / "beamformer_constant_sweep.pdf"
+OUT_DIR = PROJECT / "results" / "beamformer" / "sweep"
+MD_PATH = PROJECT / "results" / "beamformer" / "beamformer_constant_sweep_detailed.md"
+PDF_PATH = PROJECT / "results" / "beamformer" / "beamformer_constant_sweep_detailed.pdf"
+SIMPLE_PDF_PATH = PROJECT / "results" / "beamformer" / "beamformer_constant_sweep.pdf"
 
 TIE = 0.01
 TUMOR_WEIGHT = 0.70
@@ -828,7 +828,7 @@ def write_markdown(summary: dict) -> str:
             "- One scan can prefer a different value. The default is the cohort mean. Per-scan retuning is a separate search and is not what these defaults are.",
             "- Geometry, wave speed, and the numerical floor ε = 1e-9 were held at the values the app already uses. This sweep does not retune those.",
             "",
-            "Plots: `results/beamformer_sweep/das_gamma.png`, `dmas_pair.png`, `dmas_gamma.png`, `dmas_d4.png`.",
+            "Plots: `results/beamformer/sweep/das_gamma.png`, `dmas_pair.png`, `dmas_gamma.png`, `dmas_d4.png`.",
             "",
         ]
     )
@@ -977,7 +977,7 @@ def write_pdf(summary: dict, markdown: str) -> None:
     story.append(
         Paragraph(
             "The full narrative, including every named alternative (0.25, 0.35, 0.50, 0.55, 0.75), "
-            "is in results/beamformer_constant_sweep_detailed.md. Plots are in results/beamformer_sweep/.",
+            "is in results/beamformer/beamformer_constant_sweep_detailed.md. Plots are in results/beamformer/sweep/.",
             small,
         )
     )

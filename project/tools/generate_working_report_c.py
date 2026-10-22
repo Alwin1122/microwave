@@ -26,7 +26,9 @@ from reportlab.platypus import (
 from scipy.ndimage import binary_opening, find_objects, gaussian_filter, label
 
 PROJECT = Path(__file__).resolve().parent.parent
-OUT = PROJECT / "results"
+OUT = PROJECT / "results" / "reports" / "project"
+from classification_status_text import HEADING as STATUS_HEADING, PARAGRAPHS as STATUS_PARAGRAPHS  # noqa: E402
+from classification_walkthrough import append_steps  # noqa: E402
 FIG = OUT / "report_c_figures"
 S2P = PROJECT / "datasets" / "sample_touchstone.s2p"
 
@@ -1278,7 +1280,8 @@ def story(st, demo):
         "If metadata says there is a tumor: size small ≤ 2 cm, medium ≤ 4 cm, else large. "
         "Severity is a placeholder from size and BIRADS (BIRADS ≥ 4 can raise the bucket). "
         "Quadrant from (x, y), with a 1 cm disk called central. Shape is the metadata string. "
-        "Healthy scans are labeled healthy. This is a filing system for experiments, not a trained diagnostic model.",
+        "Healthy scans are labeled healthy. These are filing labels. "
+        "The learned reading of tumour, size, diameter and criticality is Steps 45–60.",
         st,
     ))
 
@@ -1299,6 +1302,14 @@ def story(st, demo):
         "Reconstruction: radius, FOV, c, beamformer mode, ROI mode, Run, three images, ROI overlay, refine tab, Auto Tweak, session report under results/.",
     ], st))
 
+    s.append(P("Learned tumour classification, step by step", st, "h1"))
+    s.append(P(
+        "The chain above ends at a rule-based YES or NO. The learned classifier is a separate module. "
+        "Each step below is the same kind of record: the input, the formula, and the number that formula produced on the fair UM-BMID test.",
+        st,
+    ))
+    append_steps(s, st, P)
+
     s.append(P("Two complete walks", st, "h1"))
     s.append(P("Walk A — sample_touchstone.s2p (what you can run immediately)", st, "h2"))
     s.extend(bullets([
@@ -1316,7 +1327,7 @@ def story(st, demo):
         "Module 2 output: same S (pass-through).",
         "Module 3: r = 18 cm, FOV 12×12 cm, 64×64, three beamformers, tumor_gt selection if labeled.",
         "ROI + refine + suspicion. Localization error compared with 3 cm (balanced).",
-        "Taxonomy string such as small/moderate/upper-left is copied from metadata.",
+        "Taxonomy string such as small/moderate/upper-left is copied from metadata. The learned scores are Steps 45–60.",
     ], st))
 
     s.append(P("Cheat-sheet of every decision number", st, "h1"))
@@ -1352,6 +1363,16 @@ def story(st, demo):
         ["Auto Tweak improve", "0.5 mm vs baseline", "41"],
         ["Size classes", "≤2 / ≤4 cm", "42"],
         ["Phase-delay r", "0.97(r−0.106)+0.148", "17"],
+        ["Empty chamber", "S_cal = S − S_empty", "45"],
+        ["Rotational mean", "S_rot = S_cal − mean over antennas", "45"],
+        ["Breast window", "0.71–5.71 ns", "46"],
+        ["Nested folds", "outer 5, inner 4, ×3", "51"],
+        ["Logistic C", "0.5, class-balanced", "52"],
+        ["Forest", "400 trees, leaf ≥ 3", "52"],
+        ["Alarm cut-off", "argmax(TPR − FPR)", "53"],
+        ["Follow-up count", "k = min(3, fewest other healthy)", "54"],
+        ["Criticality C", "(d/2 cm)^3, ×1.5 if spiculated", "55"],
+        ["Official localiser", "imgl peak, 1–4 GHz", "56"],
     ]
     s.append(table(cheat, [5.4 * cm, 7.0 * cm, 3.8 * cm], st))
 
@@ -1362,15 +1383,18 @@ def story(st, demo):
         "Was BMID pass-through used on already-clean _adi data?",
         "Are r and c the physical values for that array?",
         "Do the three images look like a ring? Try Auto Tweak or off-center ROI before inventing a new beamformer.",
-        "A PASS in automation is a quality-gate result. A YES is a tumor-candidate rule. Neither is a diagnosis.",
+        "A PASS in automation is a quality-gate result. A YES is a tumor-candidate rule. A probability from Steps 45–60 is a research score. None of these is a diagnosis.",
     ], st))
     s.append(P(
         "That is the project from A to Z: a file becomes a complex matrix, the matrix is cleaned or left alone, "
         "delays turn it into three pictures, one picture is chosen, a box is scored, the box is measured, "
-        "and a written rule says YES or NO. Every arrow has an input, a technique, and an output. "
-        "A person still has to read the picture.",
+        "a written rule says YES or NO, and a model trained on other phantoms returns a probability, a size and a criticality index. "
+        "Every arrow has an input, a technique, and an output. A person still has to read the picture.",
         st,
     ))
+    s.append(P(STATUS_HEADING, st, "h1"))
+    for paragraph in STATUS_PARAGRAPHS:
+        s.append(P(paragraph, st))
     return s
 
 

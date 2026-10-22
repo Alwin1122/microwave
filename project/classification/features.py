@@ -18,13 +18,23 @@ from roi.roi_detector import classify_tumor_candidate, detect_rois, tumor_likeli
 _EPS = 1e-20
 
 BAND_EDGES_HZ = tuple(float(edge) * 1e9 for edge in range(1, 9))
-TIME_BIN_NS = 1.0
-N_TIME_BINS = 10
+# Breast responses in UM-BMID sit in this window; earlier time is the antenna.
+# Reimer's logistic-regression baseline on this dataset kept 0.71–5.71 ns.
+BREAST_T_START_S = 0.71e-9
+BREAST_T_END_S = 5.71e-9
 N_ANGULAR_HARMONICS = 4
 
 
 def _log10(value: float) -> float:
     return float(np.log10(max(float(value), _EPS)))
+
+
+def breast_time_mask(frequencies: np.ndarray) -> np.ndarray:
+    """Samples whose IFFT delay falls inside the breast, not the antenna."""
+    freqs = np.asarray(frequencies, dtype=float)
+    dt = 1.0 / (freqs.size * float(np.mean(np.diff(freqs))))
+    t = np.arange(freqs.size) * dt
+    return (t >= BREAST_T_START_S) & (t <= BREAST_T_END_S)
 
 
 def calibrate_empty(s_parameters: np.ndarray, empty_reference: np.ndarray) -> np.ndarray:
@@ -64,13 +74,15 @@ def signal_features(
         feats[f"sig_band{band}_rot"] = float(rot_power[sel].sum() / (power[sel].sum() + _EPS))
 
     time_signals = np.abs(frequency_to_time(cal, freqs)) ** 2
-    dt_ns = 1e9 / (float(np.mean(np.diff(freqs))) * freqs.size)
-    per_bin = max(1, int(round(TIME_BIN_NS / dt_ns)))
+    in_breast = breast_time_mask(freqs)
+    breast = time_signals[in_breast]
     total_time = float(time_signals.sum()) + _EPS
-    for k in range(N_TIME_BINS):
-        window = time_signals[k * per_bin : (k + 1) * per_bin]
-        feats[f"sig_t{k}_log"] = _log10(window.mean())
-        feats[f"sig_t{k}_frac"] = float(window.sum() / total_time)
+    feats["sig_win_log"] = _log10(float(breast.mean()) if breast.size else 0.0)
+    feats["sig_win_frac"] = float(breast.sum() / total_time) if breast.size else 0.0
+    for k, sample in enumerate(breast):
+        mean = float(sample.mean())
+        feats[f"sig_w{k:02d}_log"] = _log10(mean)
+        feats[f"sig_w{k:02d}_cv"] = float(sample.std() / (mean + _EPS))
 
     per_antenna_total = power.sum(axis=0)
     spectrum = np.abs(np.fft.rfft(per_antenna_total))

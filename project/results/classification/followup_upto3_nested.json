@@ -1,0 +1,174 @@
+{
+  "n_fair": 246,
+  "n_fair_phantoms": 24,
+  "fair_by_generation": {
+    "gen1": 46,
+    "gen3": 200
+  },
+  "chance_balanced_accuracy": 0.3333333333333333,
+  "average_guess_mae_cm": 0.8487011699385287,
+  "detection": {
+    "n": 246,
+    "nested": {
+      "auc": {
+        "mean": 0.9735827439575209,
+        "std": 0.0013245324313296497
+      },
+      "sensitivity": {
+        "mean": 0.897018970189702,
+        "std": 0.010139992918086527
+      },
+      "specificity": {
+        "mean": 0.9214092140921409,
+        "std": 0.007665114159203809
+      },
+      "balanced_accuracy": {
+        "mean": 0.9092140921409214,
+        "std": 0.006909240533323586
+      },
+      "n": {
+        "mean": 246.0,
+        "std": 0.0
+      },
+      "tp": {
+        "mean": 110.33333333333333,
+        "std": 1.247219128924647
+      },
+      "fp": {
+        "mean": 9.666666666666666,
+        "std": 0.9428090415820634
+      },
+      "tn": {
+        "mean": 113.33333333333333,
+        "std": 0.9428090415820634
+      },
+      "fn": {
+        "mean": 12.666666666666666,
+        "std": 1.247219128924647
+      },
+      "tuned_sensitivity": {
+        "mean": 0.8834688346883469,
+        "std": 0.003832557079601904
+      },
+      "tuned_specificity": {
+        "mean": 0.94579945799458,
+        "std": 0.01916278539800942
+      },
+      "auc_gen1": {
+        "mean": 0.8557025834908633,
+        "std": 0.021293944862905843
+      },
+      "auc_gen3": {
+        "mean": 0.9851999999999999,
+        "std": 0.0014966629547096095
+      },
+      "auc_small": {
+        "mean": 0.9696893892015844,
+        "std": 0.002586293503318102
+      }
+    },
+    "setup_only": {
+      "auc": {
+        "mean": 0.4921673606979972,
+        "std": 3.204937810639273e-17
+      },
+      "sensitivity": {
+        "mean": 0.5121951219512195,
+        "std": 0.0331909179238913
+      },
+      "specificity": {
+        "mean": 0.4796747967479675,
+        "std": 0.033190917923891325
+      },
+      "balanced_accuracy": {
+        "mean": 0.4959349593495935,
+        "std": 5.551115123125783e-17
+      },
+      "n": {
+        "mean": 246.0,
+        "std": 0.0
+      },
+      "tp": {
+        "mean": 63.0,
+        "std": 4.08248290463863
+      },
+      "fp": {
+        "mean": 64.0,
+        "std": 4.08248290463863
+      },
+      "tn": {
+        "mean": 59.0,
+        "std": 4.08248290463863
+      },
+      "fn": {
+        "mean": 60.0,
+        "std": 4.08248290463863
+      }
+    },
+    "chosen": {
+      "signal_rot|logistic|fair": 11,
+      "signal_rot|random_forest|fair": 3,
+      "signal|logistic|fair": 1
+    }
+  },
+  "size_class": {
+    "n": 123,
+    "nested": {
+      "balanced_accuracy": {
+        "mean": 0.5627039627039627,
+        "std": 0.014479759198503405
+      },
+      "accuracy_gen1": {
+        "mean": 0.49275362318840576,
+        "std": 0.05422691864889769
+      },
+      "accuracy_gen3": {
+        "mean": 0.8966666666666666,
+        "std": 0.012472191289246483
+      }
+    },
+    "setup_only": {
+      "balanced_accuracy": {
+        "mean": 0.4662004662004662,
+        "std": 0.0015383830515324941
+      }
+    },
+    "chosen": {
+      "breast|logistic|fair": 3,
+      "breast|logistic|fair_plus_other": 4,
+      "signal_rot|logistic|fair_plus_other": 2,
+      "signal_rot|random_forest|fair_plus_other": 3,
+      "signal|logistic|fair": 2,
+      "signal|random_forest|fair": 1
+    }
+  },
+  "diameter": {
+    "n": 123,
+    "nested": {
+      "mae_cm": {
+        "mean": 0.39923911998213324,
+        "std": 0.004575143899531527
+      },
+      "mae_cm_gen1": {
+        "mean": 1.2827719051278834,
+        "std": 0.0030414449239738886
+      },
+      "mae_cm_gen3": {
+        "mean": 0.19602657939861068,
+        "std": 0.005386645234625253
+      }
+    },
+    "setup_only": {
+      "mae_cm": {
+        "mean": 0.6738387125160806,
+        "std": 0.002454967759045063
+      }
+    },
+    "chosen": {
+      "breast|random_forest|fair": 1,
+      "breast|random_forest|fair_plus_other": 2,
+      "signal_rot|random_forest|fair": 5,
+      "signal|random_forest|fair_plus_other": 7
+    }
+  }
+}

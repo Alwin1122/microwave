@@ -1,0 +1,105 @@
+{
+  "protocol": "Fair sessions, equal class counts, StratifiedGroupKFold by phantom, 5 folds, 3 seeds. Train on every tumour or healthy scan whose phantom is outside the test fold. CNN epochs chosen on a training-phantom split.",
+  "official_nested_auc": 0.706,
+  "adopt_if_mean_auc_above": 0.725,
+  "n_fair": 268,
+  "sinogram_shape": [
+    2,
+    36,
+    32
+  ],
+  "pca_logistic": {
+    "auc": {
+      "mean": 0.45204945422143017,
+      "std": 0.00843025783796583
+    },
+    "sensitivity": {
+      "mean": 0.49751243781094523,
+      "std": 0.08878889700285943
+    },
+    "specificity": {
+      "mean": 0.4129353233830846,
+      "std": 0.1408496285262892
+    },
+    "balanced_accuracy": {
+      "mean": 0.45522388059701485,
+      "std": 0.02792281631920851
+    },
+    "n": {
+      "mean": 268.0,
+      "std": 0.0
+    },
+    "tp": {
+      "mean": 66.66666666666667,
+      "std": 11.897712198383164
+    },
+    "fp": {
+      "mean": 78.66666666666667,
+      "std": 18.87385022252275
+    },
+    "tn": {
+      "mean": 55.333333333333336,
+      "std": 18.87385022252275
+    },
+    "fn": {
+      "mean": 67.33333333333333,
+      "std": 11.897712198383164
+    },
+    "auc_gen1": {
+      "mean": 0.42975206611570255,
+      "std": 0.011687715391513183
+    },
+    "auc_gen3": {
+      "mean": 0.4560666666666667,
+      "std": 0.004515405728048002
+    }
+  },
+  "sinogram_cnn": {
+    "auc": {
+      "mean": 0.49527548823048934,
+      "std": 0.000528500811074738
+    },
+    "sensitivity": {
+      "mean": 0.2985074626865672,
+      "std": 0.05812597734103445
+    },
+    "specificity": {
+      "mean": 0.6716417910447761,
+      "std": 0.048746064532998575
+    },
+    "balanced_accuracy": {
+      "mean": 0.48507462686567165,
+      "std": 0.005276916277511538
+    },
+    "n": {
+      "mean": 268.0,
+      "std": 0.0
+    },
+    "tp": {
+      "mean": 40.0,
+      "std": 7.788880963698615
+    },
+    "fp": {
+      "mean": 44.0,
+      "std": 6.531972647421808
+    },
+    "tn": {
+      "mean": 90.0,
+      "std": 6.531972647421808
+    },
+    "fn": {
+      "mean": 94.0,
+      "std": 7.788880963698615
+    },
+    "auc_gen1": {
+      "mean": 0.46066727884909703,
+      "std": 0.021656899848556756
+    },
+    "auc_gen3": {
+      "mean": 0.5062,
+      "std": 0.006211816696157948
+    }
+  },
+  "higher_of_the_two": "cnn",
+  "adopted": false
+}

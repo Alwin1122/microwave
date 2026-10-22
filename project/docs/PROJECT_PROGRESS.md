@@ -154,8 +154,39 @@ python main.py
 
 ---
 
+## Tumour classification (current)
+
+Official scores on the fair UM-BMID test (a phantom is never in both training and test):
+
+| Question | Score |
+|---|---|
+| First scan, nested model (signal + image) | **71/100** |
+| Follow-up against earlier healthy scans of the same breast | **97/100** |
+
+A later side check that used only the signal features, and only the fair training scans, scored about 69. Adding scattering formulas did not raise it. That check did **not** replace the 71.
+
+A convolutional network on the breast-window sinogram scored 50/100 on the same fair phantom-held-out test. A PCA-then-logistic classifier on that sinogram scored 45/100. The network fit the breasts it trained on and did not carry that fit to a new phantom. Neither replaced the 71. The numbers are in `results/classification/sinogram_models.json`.
+
+Write-ups:
+
+- `results/reports/classification/how_classification_works.pdf` — process, cut-offs, formulas
+- `results/reports/classification/guide_progress.pdf` — numbers for a project guide
+
+## Where reports live
+
+| Folder | What |
+|---|---|
+| `results/reports/dataset/` | Dataset report |
+| `results/reports/automation/` | Automation report |
+| `results/reports/project/` | Project working report |
+| `results/reports/techniques/` | Techniques checklist |
+| `results/reports/classification/` | The two classification write-ups |
+| `results/classification/` | Scores, feature caches, saved models (not prose) |
+| `results/beamformer/` | Beamformer constant sweep |
+| `results/latest_auto_analysis.md` | Latest automation run (the app writes this path) |
+
 ## Recommended next steps
 
 1. Wire Hamming / Week 3 time-domain as default Module 3 reconstruction input when present.
 2. Keep BMID localization experiments documented in `BMID_DEVELOPMENT_STEPS.md`.
-3. Ensure teammates clone **`breawave`** or updated **`master`** (not an old default tip without docs).
+3. First-scan detection is still the weak number (71/100). Follow-up is the result to quote.

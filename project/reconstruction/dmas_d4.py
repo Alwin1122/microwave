@@ -12,7 +12,7 @@ from reconstruction.dmas import (
 )
 
 # Textbook D4 uses exponent 1/4. On the UM-BMID cohort sweep
-# (results/beamformer_constant_sweep.pdf) exponents from 0.10 to 0.80
+# (results/beamformer/beamformer_constant_sweep.pdf) exponents from 0.10 to 0.80
 # landed within 0.01 of each other. 0.25 is that textbook value and
 # matches the peak. 0.00 scatters the spot. 0.85 and above raise
 # healthy false positives. The earlier 0.55 default was not better.
@@ -34,7 +34,7 @@ def dmas_d4_reconstruct(
     """Reconstruct using DMAS followed by a contrast-preserving D4 map.
 
     ``d4_exponent=0.25`` is both the textbook fourth root and the cohort
-    average. See results/beamformer_constant_sweep.pdf.
+    average. See results/beamformer/beamformer_constant_sweep.pdf.
     """
     intermediate = dmas_reconstruct(
         time_signals,

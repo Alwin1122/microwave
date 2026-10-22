@@ -35,7 +35,11 @@ REPO = PROJECT.parent
 if str(PROJECT) not in sys.path:
     sys.path.insert(0, str(PROJECT))
 
+from classification.features import calibrate_empty, signal_features  # noqa: E402
+from classification.scattering_math import scattering_descriptors  # noqa: E402
 from classification.predict import scan_features  # noqa: E402
+from data_loader.bmid_loader import bmid_frequencies_hz  # noqa: E402
+from reconstruction.bmid_geometry import remove_rotational_mean  # noqa: E402
 from data_loader.bmid_loader import _load_fd_cube, _load_metadata_structs, _safe_float, _safe_str  # noqa: E402
 
 OUT_DIR = PROJECT / "results" / "classification"
@@ -111,17 +115,66 @@ def scan_records(generation: str, md_path: Path) -> list[dict]:
     return records
 
 
+def signal_pair_features(raw: np.ndarray, reference: np.ndarray) -> dict[str, float]:
+    """Signal features of the calibrated scan, and again after rotational-mean removal."""
+    freqs = bmid_frequencies_hz()
+    raw = np.asarray(raw, dtype=complex)
+    cal = calibrate_empty(raw, reference)
+    feats = signal_features(raw, cal, freqs)
+    feats.update(signal_features(raw, remove_rotational_mean(cal), freqs, prefix="rsig"))
+    feats.update(scattering_descriptors(cal, freqs))
+    return feats
+
+
 def process_scan(task: tuple[dict, np.ndarray, np.ndarray]) -> tuple[dict, dict[str, float]]:
     record, raw, reference = task
     return record, scan_features(record["generation"], record["ant_rad_cm"], raw, reference)
 
 
-def attach_twins(records: list[dict], k: int = TWIN_K) -> list[dict]:
-    """Give every tumor/healthy scan k other healthy scans of the same phantom and session.
+def process_signal(task: tuple[dict, np.ndarray, np.ndarray]) -> tuple[dict, dict[str, float]]:
+    record, raw, reference = task
+    return record, signal_pair_features(raw, reference)
 
-    The baseline is chosen the same way for both classes (random, seeded by scan id),
-    so its choice carries no label information. Scans without k such twins are dropped.
+
+def fair_twins(records: list[dict], cap: int = TWIN_K) -> list[dict]:
+    """Same-sitting healthy baseline with one shared reference count per sitting.
+
+    Every kept scan in a sitting is averaged against the same number of other
+    healthy scans: the fewest any of them has, capped at ``cap``. A tumour scan
+    is never given a cleaner baseline than the healthy scans from that sitting,
+    so the count cannot give away the label. Sittings where a scan has no other
+    healthy scan are dropped.
     """
+    grouped: dict[tuple, list[dict]] = {}
+    for record in records:
+        if record["group"] in ("tumor", "healthy_fib"):
+            grouped.setdefault((record["phant_id"], record["n_session"]), []).append(record)
+    kept = []
+    for group in grouped.values():
+        healthy = [record["index"] for record in group if record["group"] == "healthy_fib"]
+        usable = []
+        for record in group:
+            twins = [index for index in healthy if index != record["index"]]
+            if twins:
+                usable.append((record, twins))
+        if not usable:
+            continue
+        n_use = min(cap, min(len(twins) for _, twins in usable))
+        for record, twins in usable:
+            rng = np.random.default_rng(record["scan_id"])
+            chosen = sorted(int(i) for i in rng.choice(np.asarray(twins), n_use, replace=False))
+            kept.append({**record, "twin_indices": chosen})
+    return kept
+
+
+def attach_twins(records: list[dict], k: int = TWIN_K, min_k: int | None = None) -> list[dict]:
+    """Give every tumor/healthy scan other healthy scans of the same phantom and session.
+
+    Uses up to ``k`` of them (at least ``min_k``). The baseline is chosen the same
+    way for both classes (random, seeded by scan id), so its choice carries no
+    label information. Scans without ``min_k`` such twins are dropped.
+    """
+    need = k if min_k is None else min_k
     kept = []
     for record in records:
         if record["group"] not in ("tumor", "healthy_fib"):
@@ -134,10 +187,11 @@ def attach_twins(records: list[dict], k: int = TWIN_K) -> list[dict]:
             and other["n_session"] == record["n_session"]
             and other["index"] != record["index"]
         ]
-        if len(twins) < k:
+        if len(twins) < need:
             continue
         rng = np.random.default_rng(record["scan_id"])
-        kept.append({**record, "twin_indices": sorted(int(i) for i in rng.choice(twins, k, replace=False))})
+        take = min(k, len(twins))
+        kept.append({**record, "twin_indices": sorted(int(i) for i in rng.choice(twins, take, replace=False))})
     return kept
 
 
@@ -152,10 +206,63 @@ def iter_tasks(generation: str, fd_path: Path, records: list[dict], reference: s
     del cube
 
 
+def refresh_signal_columns(features_path: Path, generation_specs, reference: str, workers: int) -> None:
+    """Recompute sig_/rsig_ columns and keep the existing image columns."""
+    with np.load(features_path, allow_pickle=False) as old:
+        old_names = [str(name) for name in old["feature_names"]]
+        image_names = [name for name in old_names if name.startswith(("img_", "imgl_", "d4img_"))]
+        image_index = [old_names.index(name) for name in image_names]
+        old_ids = [int(v) for v in old["scan_id"]]
+        old_generation = np.array([str(v) for v in old["generation"]])
+        old_scan_id = np.array([int(v) for v in old["scan_id"]])
+        old_image = np.array(old["X"][:, image_index], dtype=float) if image_index else np.zeros((len(old_ids), 0))
+        meta = {key: np.array(old[key]) for key in old.files if key not in ("X", "feature_names")}
+    by_generation: dict[str, list[dict]] = {}
+    for generation, fd_path, md_name in generation_specs:
+        records = scan_records(generation, fd_path.parent / md_name)
+        if reference == "adi":
+            records = [r for r in records if r["adi_index"] is not None]
+        elif reference == "twin":
+            records = fair_twins(records)
+        by_generation[generation] = records
+
+    got: dict[tuple[str, int], dict[str, float]] = {}
+    started = time.time()
+    with get_context("spawn").Pool(workers) as pool:
+        for generation, fd_path, _md_name in generation_specs:
+            records = by_generation[generation]
+            wanted = {old_ids[i] for i in range(len(old_ids)) if old_generation[i] == generation}
+            records = [r for r in records if r["scan_id"] in wanted]
+            print(f"{generation}: refreshing {len(records)} signal vectors", flush=True)
+            found: dict[int, dict[str, float]] = {}
+            for record, feats in pool.imap(process_signal, iter_tasks(generation, fd_path, records, reference), chunksize=4):
+                found[record["scan_id"]] = feats
+            missing = wanted - set(found)
+            if missing:
+                raise RuntimeError(f"{generation} refresh missed {len(missing)} scans, e.g. {sorted(missing)[:5]}")
+            for scan_id, feats in found.items():
+                got[(generation, scan_id)] = feats
+            print(f"  {generation} done  {time.time() - started:.0f}s", flush=True)
+
+    signal_rows = [got[(gen, scan_id)] for gen, scan_id in zip(old_generation, old_scan_id)]
+    signal_names = sorted(signal_rows[0])
+    names = sorted(signal_names + image_names)
+    matrix = np.empty((len(signal_rows), len(names)), dtype=float)
+    name_at = {name: i for i, name in enumerate(names)}
+    for row_i, feats in enumerate(signal_rows):
+        for name in signal_names:
+            matrix[row_i, name_at[name]] = feats.get(name, np.nan)
+        for name_i, name in enumerate(image_names):
+            matrix[row_i, name_at[name]] = old_image[row_i, name_i]
+    np.savez_compressed(features_path, X=matrix, feature_names=np.array(names), **meta)
+    print(json.dumps({"path": str(features_path), "n_scans": len(signal_rows), "n_features": len(names), "seconds": round(time.time() - started, 1)}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=0, help="Scans per generation (0 = all).")
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 2))
+    parser.add_argument("--refresh-signal", action="store_true", help="Recompute signal columns in an existing feature file; keep image columns.")
     parser.add_argument(
         "--reference",
         choices=("emp", "adi", "twin"),
@@ -168,6 +275,11 @@ def main() -> None:
 
     suffix = "" if args.reference == "emp" else f"_{args.reference}_{'_'.join(args.gens)}"
     features_path = OUT_DIR / f"features{suffix}.npz"
+    if args.refresh_signal:
+        specs = [item for item in GENERATIONS if item[0] in args.gens]
+        refresh_signal_columns(features_path, specs, args.reference, args.workers)
+        return
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     feature_rows: list[dict[str, float]] = []
@@ -181,7 +293,7 @@ def main() -> None:
             if args.reference == "adi":
                 records = [r for r in records if r["adi_index"] is not None]
             elif args.reference == "twin":
-                records = attach_twins(records)
+                records = fair_twins(records)
             if args.limit:
                 by_group: dict[str, list[dict]] = {}
                 for record in records:

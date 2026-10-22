@@ -15,6 +15,19 @@ Brief PDFs (project folder): `Module_2_Signal_Preprocessing_Bullets_for_UG_Stude
 
 ---
 
+## Reports
+
+| Report | Path |
+|---|---|
+| Dataset | `results/reports/dataset/A_Dataset_Report.pdf` |
+| Automation | `results/reports/automation/B_Automation_Report.pdf` |
+| Project working | `results/reports/project/C_Project_Working_Report.pdf` |
+| Techniques checklist | `results/reports/techniques/D_Techniques_Checklist.pdf` |
+| How classification works | `results/reports/classification/how_classification_works.pdf` |
+| Classification progress (for a guide) | `results/reports/classification/guide_progress.pdf` |
+
+Source is already split by module: `data_loader/`, `preprocessing/`, `reconstruction/`, `roi/`, `quality/`, `classification/`, `automation/`, `gui/`.
+
 ## Quick start
 
 ```bash

@@ -49,6 +49,7 @@ OUT_DIR = PROJECT / "results" / "classification"
 SUMMARY_PATH = OUT_DIR / "final_summary.json"
 MODEL_PATH = OUT_DIR / "tumor_models.joblib"
 MODEL_TWIN_PATH = OUT_DIR / "tumor_models_twin.joblib"
+MODEL_ADI_PATH = OUT_DIR / "tumor_models_adi_gen3.joblib"
 TWIN_FEATURES = OUT_DIR / "features_twin_gen1_gen3.npz"
 TWIN_KEY = "twin_baseline"
 PARTIAL_PATH = OUT_DIR / "final_summary_partial.json"
@@ -63,8 +64,13 @@ N_JOBS = -2
 FEATURE_SETS = {
     "signal": ("sig_",),
     "signal_rot": ("rsig_",),
-    "image": ("img_", "imgl_", "d4img_"),
-    "all": ("sig_", "rsig_", "img_", "imgl_", "d4img_"),
+    # Breast-window time samples only (0.71–5.71 ns). Frequency-band features
+    # still contain the antenna reflection; this set does not.
+    "breast": ("sig_w", "rsig_w"),
+    # Coherent DAS only. DMAS-D4 features in the cache were built before the
+    # baseband remodulation fix, so d4img_ is not a candidate.
+    "image": ("img_", "imgl_"),
+    "all": ("sig_", "rsig_", "img_", "imgl_"),
 }
 POOLS = ("fair", "fair_plus_other")
 SPOT = ("imgl_peak_x_cm", "imgl_peak_y_cm")
@@ -167,12 +173,12 @@ def predict_fold(task, table, fair, cand, test_idx, excluded, n_jobs: int = 1):
     return task.fit_predict(model, table["X"][np.ix_(train, cols)], task.target[train], table["X"][np.ix_(test_idx, cols)], n_jobs)
 
 
-def cv_predictions(task, table, fair, cand, eval_idx, n_folds, seed, extra_excluded=frozenset()):
+def cv_predictions(task, table, fair, cand, eval_idx, n_folds, seed, extra_excluded=frozenset(), n_jobs: int = 1):
     """Out-of-fold predictions of one candidate over ``eval_idx`` (fair rows)."""
     pred = {}
     for test_idx in folds_for(eval_idx, task.strat, table["groups"], n_folds, seed):
         excluded = set(table["groups"][test_idx]) | set(extra_excluded)
-        for i, p in zip(test_idx, predict_fold(task, table, fair, cand, test_idx, excluded)):
+        for i, p in zip(test_idx, predict_fold(task, table, fair, cand, test_idx, excluded, n_jobs)):
             pred[i] = p
     return np.array([pred[i] for i in eval_idx])
 
@@ -187,7 +193,8 @@ def nested(task: Task, table: dict, fair: np.ndarray, seed: int) -> tuple[np.nda
     """Nested predictions; for detection also the alarm threshold, chosen on training phantoms only."""
     eval_idx = np.flatnonzero(task.rows & fair)
     preds, thresholds, chosen = {}, {}, []
-    for test_idx in folds_for(eval_idx, task.strat, table["groups"], OUTER_FOLDS, seed):
+    outer = folds_for(eval_idx, task.strat, table["groups"], OUTER_FOLDS, seed)
+    for fold_i, test_idx in enumerate(outer, start=1):
         outer_groups = set(table["groups"][test_idx])
         inner_idx = np.setdiff1d(eval_idx, test_idx)
         cands = candidates(task)
@@ -202,6 +209,7 @@ def nested(task: Task, table: dict, fair: np.ndarray, seed: int) -> tuple[np.nda
         for i, p in zip(test_idx, predict_fold(task, table, fair, best, test_idx, outer_groups, n_jobs=-1)):
             preds[i] = p
             thresholds[i] = threshold
+        print(f"    fold {fold_i}/{len(outer)} chose {'|'.join(best)}", flush=True)
     return eval_idx, np.array([preds[i] for i in eval_idx]), chosen, np.array([thresholds[i] for i in eval_idx])
 
 
@@ -344,9 +352,12 @@ def evaluate(table: dict, fair: np.ndarray, repeats: int, label: str, done: dict
         # basis for the final model's choice; the nested score above is the honest one).
         eval_idx = np.flatnonzero(task.rows & fair)
         cands = candidates(task)
-        all_preds = Parallel(n_jobs=N_JOBS)(
-            delayed(cv_predictions)(task, table, fair, cand, eval_idx, OUTER_FOLDS, SEED) for cand in cands
-        )
+        # One candidate at a time, with the forest using every core. A second
+        # process pool here was stalling for hours after the nested search.
+        all_preds = []
+        for cand_i, cand in enumerate(cands, start=1):
+            print(f"    compare {cand_i}/{len(cands)} {'|'.join(cand)}", flush=True)
+            all_preds.append(cv_predictions(task, table, fair, cand, eval_idx, OUTER_FOLDS, SEED, n_jobs=-1))
         table_scores = {"|".join(c): task.score(task.target[eval_idx], p) for c, p in zip(cands, all_preds)}
         result["all_candidates_cv"] = table_scores
         result["final_choice"] = max(table_scores, key=table_scores.get)
@@ -391,6 +402,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--refit", action="store_true", help="Only refit the saved models from an existing final_summary.json.")
+    parser.add_argument("--sections", nargs="+", choices=("main", "adi", "twin"), default=["twin", "adi", "main"])
     args = parser.parse_args()
 
     table = load(OUT_DIR / "features.npz")
@@ -407,7 +419,9 @@ def main() -> None:
         return
     started = time.time()
     protocol = {
-        "version": 2,
+        "version": 3,
+        "signal_window_ns": [0.71, 5.71],
+        "image_features": "coherent DAS only; DMAS-D4 excluded until rebuilt with carrier remodulation",
         "test_set": "sessions with both tumor and healthy scans, balanced per session",
         "grouping": "phantom name (never in both train and test)",
         "outer_folds": OUTER_FOLDS, "inner_folds": INNER_FOLDS, "repeats": args.repeats,
@@ -426,23 +440,30 @@ def main() -> None:
             PARTIAL_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return save
 
-    summary["main"] = evaluate(table, fair, args.repeats, "main", summary.get("main", {}), saver("main"))
-
-    adi_path = OUT_DIR / "features_adi_gen3.npz"
-    if adi_path.exists():
-        adi = load(adi_path)
-        key = "reference_gen3_fat_scan"
-        summary[key] = evaluate(adi, np.ones(len(adi["group"]), dtype=bool), args.repeats, "gen3 fat-only reference", summary.get(key, {}), saver(key))
-
-    if twin is not None:
+    if "twin" in args.sections and twin is not None:
         summary[TWIN_KEY] = evaluate(twin, twin_fair, args.repeats, "same-phantom healthy baseline", summary.get(TWIN_KEY, {}), saver(TWIN_KEY))
         summary["final_models_twin"] = save_bundle(fit_final(twin, twin_fair, summary[TWIN_KEY]), MODEL_TWIN_PATH)
+        print(f"saved {MODEL_TWIN_PATH}", flush=True)
 
-    summary["final_models"] = save_bundle(fit_final(table, fair, summary["main"]), MODEL_PATH)
+    adi_path = OUT_DIR / "features_adi_gen3.npz"
+    if "adi" in args.sections and adi_path.exists():
+        adi = load(adi_path)
+        adi_fair = balanced_fair_mask(adi)
+        key = "reference_gen3_fat_scan"
+        summary[key] = evaluate(adi, adi_fair, args.repeats, "gen3 fat-only reference", summary.get(key, {}), saver(key))
+        summary["final_models_adi_gen3"] = save_bundle(fit_final(adi, adi_fair, summary[key]), MODEL_ADI_PATH)
+        print(f"saved {MODEL_ADI_PATH}", flush=True)
+
+    if "main" in args.sections:
+        summary["main"] = evaluate(table, fair, args.repeats, "main", summary.get("main", {}), saver("main"))
+        summary["final_models"] = save_bundle(fit_final(table, fair, summary["main"]), MODEL_PATH)
+        print(f"saved {MODEL_PATH}", flush=True)
+
     summary["seconds"] = round(time.time() - started, 1)
     SUMMARY_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    PARTIAL_PATH.unlink(missing_ok=True)
-    print(f"saved {SUMMARY_PATH} and {MODEL_PATH}")
+    if set(args.sections) >= {"twin", "adi", "main"}:
+        PARTIAL_PATH.unlink(missing_ok=True)
+    print(f"saved {SUMMARY_PATH}")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from classification.criticality import criticality_from_scan, morphology_type
+
 SIZE_SMALL_CM = 2.0
 SIZE_MEDIUM_CM = 4.0
 
@@ -23,6 +25,9 @@ class TumorTaxonomy:
     shape: str | None = None
     location_quadrant: str | None = None
     source: str = "metadata"
+    morphology: str | None = None  # spherical | spiculated
+    criticality_index: float | None = None  # Born volume index; not clinical BI-RADS
+    criticality_class: str | None = None  # low | moderate | high
 
     def short_label(self) -> str:
         if self.presence != "tumor":
@@ -51,6 +56,9 @@ class TumorTaxonomy:
             "BIRADS": "n/a" if self.birads is None else str(self.birads),
             "Severity (placeholder)": self.severity_class or "n/a",
             "Shape": self.shape or "n/a",
+            "Type": self.morphology or "n/a",
+            "Criticality index": "n/a" if self.criticality_index is None else f"{self.criticality_index:.2f}",
+            "Criticality": self.criticality_class or "n/a",
             "Quadrant": self.location_quadrant or "n/a",
         }
 
@@ -116,6 +124,7 @@ def classify_scan(
         return TumorTaxonomy(presence="healthy", birads=birads)
     size = size_class_from_diameter_cm(tum_diam_cm)
     shape = (tum_shape or "").strip().lower() or None
+    index, criticality = criticality_from_scan(tum_diam_cm, shape)
     return TumorTaxonomy(
         presence="tumor",
         size_class=size,
@@ -123,6 +132,9 @@ def classify_scan(
         severity_class=severity_from_birads_and_size(birads, size),
         shape=shape,
         location_quadrant=location_quadrant(tum_x_cm, tum_y_cm),
+        morphology=morphology_type(shape),
+        criticality_index=index,
+        criticality_class=criticality,
     )
 
 

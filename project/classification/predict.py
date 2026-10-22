@@ -7,7 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
+from classification.criticality import criticality_from_scan
 from classification.features import calibrate_empty, image_features, signal_features
+from classification.scattering_math import scattering_descriptors
 from data_loader.bmid_loader import bmid_frequencies_hz
 from reconstruction.bmid_geometry import BMID_GEOMETRY, remove_rotational_mean
 from reconstruction.das import das_coherent_from_frequency
@@ -18,7 +20,13 @@ from reconstruction.reconstruction_manager import (
     antenna_positions_from_config,
 )
 
-MODEL_PATH = Path(__file__).resolve().parent.parent / "results" / "classification" / "tumor_models.joblib"
+_RESULTS = Path(__file__).resolve().parent.parent / "results" / "classification"
+MODEL_PATH = _RESULTS / "tumor_models.joblib"
+MODEL_PATHS = {
+    "emp": MODEL_PATH,
+    "twin": _RESULTS / "tumor_models_twin.joblib",
+    "adi": _RESULTS / "tumor_models_adi_gen3.joblib",
+}
 SPAN = (-0.06, 0.06)
 GRID = 64
 # Chosen by tools/compare_background_removal.py (best blind localisation on gen3, both phantom halves).
@@ -53,6 +61,7 @@ def scan_features(generation: str, ant_rad_cm: float, raw: np.ndarray, reference
 
     feats = signal_features(raw, cal, freqs)
     feats.update(signal_features(raw, cal_rot, freqs, prefix="rsig"))
+    feats.update(scattering_descriptors(cal, freqs))
     das = das_coherent_from_frequency(cal_rot, freqs, positions, grid_x, grid_y, wave_speed=config.wave_speed)
     feats.update(image_features(das, config.x_span, config.y_span, "img"))
     low = (freqs >= LOW_BAND_HZ[0]) & (freqs <= LOW_BAND_HZ[1])
@@ -87,9 +96,31 @@ def predict_from_features(feats: dict[str, float], bundle: dict, generation: str
     out["image_spot_cm"] = (float(feats["imgl_peak_x_cm"]), float(feats["imgl_peak_y_cm"]))
     geometry = BMID_GEOMETRY.get(generation or "")
     out["image_spot_reliable"] = bool(geometry and geometry.localises)
+    if "diameter_cm" in out:
+        # The saved diameter model does not predict margin, so the index uses
+        # the spherical factor. A spiculated margin is applied only when a
+        # shape string is supplied by the caller via feats["known_shape"].
+        index, criticality = criticality_from_scan(out["diameter_cm"], feats.get("known_shape"))
+        out["criticality_index"] = index
+        out["criticality_class"] = criticality
     return out
 
 
-def predict_scan(raw: np.ndarray, empty_reference: np.ndarray, ant_rad_cm: float, generation: str, bundle: dict | None = None) -> dict:
-    bundle = bundle or load_models()
-    return predict_from_features(scan_features(generation, ant_rad_cm, raw, empty_reference), bundle, generation)
+def predict_scan(
+    raw: np.ndarray,
+    reference: np.ndarray,
+    ant_rad_cm: float,
+    generation: str,
+    bundle: dict | None = None,
+    reference_kind: str = "emp",
+) -> dict:
+    """Predict from one scan.
+
+    ``reference_kind`` selects the model trained for that subtraction:
+    ``emp`` empty chamber, ``adi`` gen3 fat-only scan, ``twin`` earlier healthy
+    scans of the same phantom. The array passed as ``reference`` must be that scan.
+    """
+    if reference_kind not in MODEL_PATHS:
+        raise ValueError(f"reference_kind must be one of {tuple(MODEL_PATHS)}")
+    bundle = bundle or load_models(str(MODEL_PATHS[reference_kind]))
+    return predict_from_features(scan_features(generation, ant_rad_cm, raw, reference), bundle, generation)

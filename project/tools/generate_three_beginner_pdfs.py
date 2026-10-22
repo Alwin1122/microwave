@@ -27,7 +27,8 @@ from reportlab.platypus import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-OUT_DIR = PROJECT_ROOT / "results"
+OUT_DIR = PROJECT_ROOT / "results" / "reports"
+from classification_status_text import HEADING as STATUS_HEADING, PARAGRAPHS as STATUS_PARAGRAPHS  # noqa: E402
 S2P = PROJECT_ROOT / "datasets" / "sample_touchstone.s2p"
 MAT = PROJECT_ROOT / "datasets" / "sample_matlab.mat"
 
@@ -808,6 +809,9 @@ def report_a(st):
             st["body"],
         )
     )
+    story.append(Paragraph(STATUS_HEADING, st["h1"]))
+    for paragraph in STATUS_PARAGRAPHS:
+        story.append(Paragraph(paragraph, st["body"]))
     story.append(
         Paragraph(
             "End of Report A. Report C explains how these matrices become an image. "
@@ -1111,6 +1115,9 @@ def report_b(st):
             st,
         )
     )
+    story.append(Paragraph(STATUS_HEADING, st["h1"]))
+    for paragraph in STATUS_PARAGRAPHS:
+        story.append(Paragraph(paragraph, st["body"]))
     return story
 
 
@@ -1613,25 +1620,26 @@ def report_c(st):
             st["body"],
         )
     )
+    story.append(Paragraph(STATUS_HEADING, st["h1"]))
+    for paragraph in STATUS_PARAGRAPHS:
+        story.append(Paragraph(paragraph, st["body"]))
     return story
 
 
 def main():
     st = styles()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    a = OUT_DIR / "A_Dataset_Report.pdf"
-    b = OUT_DIR / "B_Automation_Report.pdf"
-    c = OUT_DIR / "C_Project_Working_Report.pdf"
+    a = OUT_DIR / "dataset" / "A_Dataset_Report.pdf"
+    b = OUT_DIR / "automation" / "B_Automation_Report.pdf"
+    a.parent.mkdir(parents=True, exist_ok=True)
+    b.parent.mkdir(parents=True, exist_ok=True)
     print("Building Report A…")
     build_doc(a, "Report A — Dataset Report", report_a(st))
     print("Building Report B…")
     build_doc(b, "Report B — Automation Report", report_b(st))
-    print("Building Report C…")
-    build_doc(c, "Report C — Project Working Report", report_c(st))
     print("Wrote:")
     print(a)
     print(b)
-    print(c)
+    print("Report C is written by tools/generate_working_report_c.py")
 
 
 if __name__ == "__main__":

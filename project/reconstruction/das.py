@@ -10,7 +10,7 @@ _C = 3e8  # speed of light in m/s
 _EPS = 1e-12
 
 # Textbook DAS uses coherence_gamma=0 (plain delay-and-sum of envelopes).
-# On a 12-scan UM-BMID cohort (see results/beamformer_constant_sweep.pdf)
+# On a 12-scan UM-BMID cohort (see results/beamformer/beamformer_constant_sweep.pdf)
 # the average-best gamma is 0.55. gamma=0 leaves the antenna ring in charge.
 # 0.75 is within 0.01 of the peak. 0.80 and above starts false positives
 # on healthy scans.
@@ -80,7 +80,7 @@ def das_reconstruct(
     """Reconstruct an image using Delay-and-Sum beamforming.
 
     ``coherence_gamma=0`` is textbook DAS. The project default (0.55) is the
-    cohort average from results/beamformer_constant_sweep.pdf.
+    cohort average from results/beamformer/beamformer_constant_sweep.pdf.
     """
     if time_signals.ndim != 2:
         raise ValueError("time_signals must be 2D (time, traces).")

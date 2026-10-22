@@ -18,7 +18,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-OUT = Path(__file__).resolve().parent.parent / "results"
+OUT = Path(__file__).resolve().parent.parent / "results" / "reports" / "techniques"
 NAVY = colors.HexColor("#1b365d")
 TEAL = colors.HexColor("#1f6f8b")
 CREAM = colors.HexColor("#f4f7fb")
@@ -455,6 +455,45 @@ AUTO = [
 ]
 
 
+CLASSIFY = [
+    [
+        "Classification · features.py",
+        "51. Signal and image features for one scan",
+        "The tumour is a weak change on top of skin and fat. Features must not use the tumour's true position.",
+        "Empty-chamber subtraction. Rotational mean removed for the rsig_ copy. Breast window 0.71–5.71 ns. Image features from the blind brightest ROI.",
+        "Named feature vector. No ground-truth coordinates inside it.",
+    ],
+    [
+        "Classification · scattering_math.py",
+        "52. Scattering spectrum, frequency slope, radar range",
+        "A first visit has no earlier healthy scan, so the leftover after the common-angle part is removed is described by formula.",
+        "L_i = s_i^2 / sum(s_j^2). log10 p(f) = a + b log10(f/1 GHz) on 2-6 GHz. d = R_antenna - c t_peak / 2.",
+        "15 scale-free numbers. Side check: they do not raise the official 71/100 first-scan score.",
+    ],
+    [
+        "Classification · criticality.py",
+        "53. Research criticality from diameter and shape",
+        "UM-BMID has no benign/malignant label. Metadata BI-RADS is breast density.",
+        "C = (d / 2 cm)^3, times 1.5 if spiculated. Low if C &lt;= 1, moderate if C &lt;= 8, high above that.",
+        "low / moderate / high. Not a clinical category.",
+    ],
+    [
+        "tools · train_tumor_models.py",
+        "54. Nested phantom-grouped test and the alarm cut-off",
+        "Picking the best of many tries on the test phantoms would inflate the score.",
+        "Outer 5 folds, inner 4, 3 repeats. Groups are phantom names. Cut-off maximises true-positive rate minus false-positive rate on training phantoms only.",
+        "Official first scan 71/100. Official follow-up 97/100. Saved in results/classification/final_summary.json.",
+    ],
+    [
+        "Classification · sinogram.py · sinogram_net.py",
+        "55. Sinogram network and PCA logistic, fair-tested, not adopted",
+        "The 2022 result reads the time-by-antenna breast window with a convolution. Simulation papers reduce a radar signature with PCA, then a linear classifier.",
+        "Log magnitude in the 0.71–5.71 ns window, empty-chamber calibrated and after rotational-mean removal, resampled to 32 antennas. Two conv layers and a global average pool. PCA keeps 20 components, then logistic regression with C = 0.5.",
+        "Fair phantom-held-out ROC: network 50/100, PCA logistic 45/100. Official model remains the forest at 71/100. Numbers in results/classification/sinogram_models.json.",
+    ],
+]
+
+
 def main():
     st = styles()
     path = OUT / "D_Techniques_Checklist.pdf"
@@ -490,6 +529,9 @@ def main():
     story.append(Paragraph("ROI, quality labels, and automation", st["h1"]))
     story.append(rows_table(st, ROI + AUTO))
     story.append(Spacer(1, 0.35 * cm))
+    story.append(Paragraph("Classification — detection, size and criticality", st["h1"]))
+    story.append(rows_table(st, CLASSIFY))
+    story.append(Spacer(1, 0.35 * cm))
     story.append(Paragraph("Required Module 3 handover (what export must contain)", st["h1"]))
     story.append(
         Paragraph(
@@ -503,7 +545,8 @@ def main():
     )
     story.append(
         Paragraph(
-            "50 rows. If a method is not in this table, it is not part of the implemented pipeline.",
+            "If a method is not in this table, it is not part of the implemented pipeline. "
+            "Classification scores are research numbers on phantoms, not a diagnosis.",
             st["note"],
         )
     )

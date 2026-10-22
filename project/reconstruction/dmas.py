@@ -10,7 +10,7 @@ from reconstruction.das import (
 )
 
 # Textbook DMAS uses signed square-root (pair_exponent=0.5) and no extra
-# coherence weight. The UM-BMID cohort sweep (results/beamformer_constant_sweep.pdf)
+# coherence weight. The UM-BMID cohort sweep (results/beamformer/beamformer_constant_sweep.pdf)
 # put the shared DMAS + DMAS-D4 average at pair_exponent=0.30 and
 # coherence_gamma=0. Extra coherence weight did not raise that average.
 DEFAULT_DMAS_PAIR_EXPONENT = 0.30
