@@ -17,25 +17,9 @@ PROJECT = Path(__file__).resolve().parents[1]
 if str(PROJECT) not in sys.path:
     sys.path.insert(0, str(PROJECT))
 
-from automation.detect_locate import detect_and_locate  # noqa: E402
-from data_loader.bmid_loader import list_bmid_scans, load_bmid_scan  # noqa: E402
+from automation.detect_locate import detect_and_locate, healthy_twin_reference  # noqa: E402
+from data_loader.bmid_loader import load_bmid_scan  # noqa: E402
 from data_loader.loader import load_dataset  # noqa: E402
-
-
-def _healthy_twin_reference(fd_path: str, scan_index: int) -> np.ndarray | None:
-    """Mean of healthy scans of the same phantom (follow-up style reference)."""
-    scans = list_bmid_scans(fd_path)
-    target = next((s for s in scans if s.index == scan_index), None)
-    if target is None:
-        return None
-    healthy = [s for s in scans if s.phant_id == target.phant_id and not s.has_tumor]
-    if not healthy:
-        return None
-    stack = [
-        np.asarray(load_bmid_scan(fd_path, s.index).s_parameters, dtype=complex)
-        for s in healthy
-    ]
-    return np.mean(np.stack(stack, axis=0), axis=0)
 
 
 def main() -> int:
@@ -71,7 +55,7 @@ def main() -> int:
         if args.kind == "emp":
             print("ERROR: no empty reference in this cube; try --kind twin", file=sys.stderr)
             return 2
-        twin = _healthy_twin_reference(path, args.scan)
+        twin = healthy_twin_reference(path, args.scan)
         if twin is not None:
             reference = twin
             kind = "twin"
@@ -83,7 +67,7 @@ def main() -> int:
             )
             return 2
     elif args.kind == "twin":
-        reference = _healthy_twin_reference(path, args.scan)
+        reference = healthy_twin_reference(path, args.scan)
         if reference is None:
             print("ERROR: no healthy twin scans for this phantom.", file=sys.stderr)
             return 2

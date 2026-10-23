@@ -46,7 +46,12 @@ class DetectLocateResult:
     localization_details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Drop the reconstruction image from JSON exports (large ndarray).
+        loc = payload.get("localization_details") or {}
+        if isinstance(loc, dict):
+            loc.pop("image", None)
+        return payload
 
 
 def _generation(dataset: MicrowaveDataset) -> str:
@@ -62,6 +67,24 @@ def _ant_rad_cm(dataset: MicrowaveDataset) -> float:
     return 18.0
 
 
+def healthy_twin_reference(fd_path: str, scan_index: int) -> np.ndarray | None:
+    """Mean S-parameters of healthy scans of the same phantom (follow-up style)."""
+    from data_loader.bmid_loader import list_bmid_scans, load_bmid_scan
+
+    scans = list_bmid_scans(fd_path)
+    target = next((s for s in scans if s.index == scan_index), None)
+    if target is None:
+        return None
+    healthy = [s for s in scans if s.phant_id == target.phant_id and not s.has_tumor]
+    if not healthy:
+        return None
+    stack = [
+        np.asarray(load_bmid_scan(fd_path, s.index).s_parameters, dtype=complex)
+        for s in healthy
+    ]
+    return np.mean(np.stack(stack, axis=0), axis=0)
+
+
 def resolve_reference(
     dataset: MicrowaveDataset,
     reference: np.ndarray | None = None,
@@ -69,7 +92,8 @@ def resolve_reference(
 ) -> tuple[np.ndarray, str, list[str]]:
     """Pick a background reference and matching classifier bundle.
 
-    Preference: caller override → empty-chamber in dataset.raw → fail with notes.
+    Preference: caller override → empty-chamber in dataset.raw → same-phantom
+    healthy mean (twin) when the source file is a BMID cube → else fail.
     """
     notes: list[str] = []
     raw = getattr(dataset, "raw", None) or {}
@@ -81,14 +105,23 @@ def resolve_reference(
         return np.asarray(reference, dtype=complex), kind, notes
 
     empty = raw.get("bmid_empty_reference")
-    if empty is not None:
+    if empty is not None and (reference_kind in (None, "emp", "auto")):
         notes.append("Using empty-chamber reference from dataset (emp model).")
         return np.asarray(empty, dtype=complex), "emp", notes
+
+    meta = dataset.metadata or {}
+    scan_index = meta.get("bmid_scan_index")
+    path = getattr(dataset, "file_path", None)
+    if path and scan_index is not None and (reference_kind in (None, "twin", "auto")):
+        twin = healthy_twin_reference(str(path), int(scan_index))
+        if twin is not None:
+            notes.append("Using same-phantom healthy mean (twin model).")
+            return twin, "twin", notes
 
     raise ValueError(
         "No background reference available for detection. Pass `reference=` "
         "(empty-chamber or same-phantom healthy scan) and `reference_kind` "
-        "('emp', 'adi', or 'twin')."
+        "('emp', 'adi', or 'twin'), or load a BMID cube that has healthy twins."
     )
 
 
@@ -138,6 +171,7 @@ def localize_blind(dataset: MicrowaveDataset) -> dict[str, Any]:
         "beamformer": "DAS",
         "x_span": config.x_span,
         "y_span": config.y_span,
+        "image": image,
     }
 
 

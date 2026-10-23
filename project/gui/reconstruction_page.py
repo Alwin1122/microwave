@@ -51,6 +51,7 @@ from quality.characterization import characterize_tumor_region
 from quality.confidence import assess_reconstruction_confidence
 from quality.tumor_taxonomy import taxonomy_from_metadata
 from reconstruction.ifft import frequency_to_time, time_axis_seconds
+from automation.detect_locate import DetectLocateResult, detect_and_locate
 from reconstruction.bmid_geometry import nearest_bmid_slot_m
 from roi.roi_detector import (
     PROMINENCE_TRUST_THRESHOLD,
@@ -113,6 +114,30 @@ class AutoCalibrateWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class DetectLocateWorker(QThread):
+    """Background worker: friend detection then our blind localization."""
+
+    progress_updated = Signal(str)
+    finished_ok = Signal(object)
+    finished_error = Signal(str)
+
+    def __init__(self, dataset, always_localize: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self.dataset = dataset
+        self.always_localize = always_localize
+
+    def run(self) -> None:
+        try:
+            self.progress_updated.emit("Detecting tumour…")
+            result = detect_and_locate(
+                self.dataset,
+                always_localize=self.always_localize,
+            )
+            self.finished_ok.emit(result)
+        except Exception as exc:  # noqa: BLE001 - surface to GUI
+            self.finished_error.emit(str(exc))
+
+
 class ReconstructionPanel(QWidget):
     """GUI panel for running beamforming reconstruction and displaying results."""
 
@@ -129,6 +154,8 @@ class ReconstructionPanel(QWidget):
         self.last_snapshot: ReconstructionSnapshot | None = None
         self.last_auto_result: AutoCalibrateResult | None = None
         self.auto_worker: AutoCalibrateWorker | None = None
+        self.detect_locate_worker: DetectLocateWorker | None = None
+        self.last_detect_locate: DetectLocateResult | None = None
         self.last_time_signals = None
         self.last_time_axis = None
         self.last_images: dict = {}
@@ -164,6 +191,14 @@ class ReconstructionPanel(QWidget):
         self.auto_tweak_button.clicked.connect(self.on_auto_tweak_clicked)
         self.auto_tweak_button.setEnabled(False)
         header.addWidget(self.auto_tweak_button)
+
+        self.detect_locate_button = QPushButton("Detect & Locate")
+        self.detect_locate_button.setToolTip(
+            "Detect tumour (classification), then mark location (Week 3 DAS peak) if flagged."
+        )
+        self.detect_locate_button.clicked.connect(self.on_detect_locate_clicked)
+        self.detect_locate_button.setEnabled(False)
+        header.addWidget(self.detect_locate_button)
 
         self.export_report_button = QPushButton("Report")
         self.export_report_button.setToolTip("Export Markdown + JSON session report")
@@ -458,8 +493,7 @@ class ReconstructionPanel(QWidget):
     def set_dataset(self, dataset: MicrowaveDataset) -> None:
         self.dataset = dataset
         self.status_label.setText(f"Loaded dataset: {dataset.file_name}")
-        self.run_button.setEnabled(True)
-        self.auto_tweak_button.setEnabled(True)
+        self._set_action_buttons_enabled(True)
         self._apply_dataset_defaults(dataset)
         self._log(f"Dataset '{dataset.file_name}' ready for reconstruction.")
 
@@ -545,8 +579,7 @@ class ReconstructionPanel(QWidget):
         prefer_off = self.roi_mode_combo.currentText() == "Prefer off-center"
         tight_peak = self.roi_mode_combo.currentText() == "Tight peak"
 
-        self.run_button.setEnabled(False)
-        self.auto_tweak_button.setEnabled(False)
+        self._set_action_buttons_enabled(False)
         self.auto_progress.setVisible(True)
         self.auto_progress.setValue(0)
         objective = "tumor GT distance" if tumor_xy is not None else "image quality"
@@ -582,9 +615,114 @@ class ReconstructionPanel(QWidget):
 
     def _on_auto_failed(self, message: str) -> None:
         self.auto_progress.setVisible(False)
-        self.run_button.setEnabled(self.dataset is not None)
-        self.auto_tweak_button.setEnabled(self.dataset is not None)
+        self._set_action_buttons_enabled(self.dataset is not None)
         self._log(f"Auto tweak failed: {message}", "ERROR")
+
+    def _set_action_buttons_enabled(self, enabled: bool) -> None:
+        self.run_button.setEnabled(enabled)
+        self.auto_tweak_button.setEnabled(enabled)
+        self.detect_locate_button.setEnabled(enabled)
+
+    def on_detect_locate_clicked(self) -> None:
+        if self.detect_locate_worker is not None and self.detect_locate_worker.isRunning():
+            self._log("Detect & Locate already running.", "WARN")
+            return
+        dataset = self._dataset_for_reconstruction()
+        if dataset is None:
+            self._log("No dataset available for Detect & Locate.", "ERROR")
+            return
+        self._set_action_buttons_enabled(False)
+        self.auto_progress.setVisible(True)
+        self.auto_progress.setRange(0, 0)  # busy indicator
+        self.status_label.setText("Detect & Locate running…")
+        self._log("Detect & Locate started (classification → Week 3 localization)…")
+        self.detect_locate_worker = DetectLocateWorker(dataset, always_localize=False, parent=self)
+        self.detect_locate_worker.progress_updated.connect(self._on_detect_locate_progress)
+        self.detect_locate_worker.finished_ok.connect(self._on_detect_locate_finished)
+        self.detect_locate_worker.finished_error.connect(self._on_detect_locate_failed)
+        self.detect_locate_worker.start()
+
+    def _on_detect_locate_progress(self, message: str) -> None:
+        self.status_label.setText(message)
+        self._log(message)
+
+    def _on_detect_locate_failed(self, message: str) -> None:
+        self.auto_progress.setVisible(False)
+        self.auto_progress.setRange(0, 100)
+        self._set_action_buttons_enabled(self.dataset is not None)
+        self._log(f"Detect & Locate failed: {message}", "ERROR")
+        self.status_label.setText("Detect & Locate failed.")
+
+    def _on_detect_locate_finished(self, result: DetectLocateResult) -> None:
+        self.last_detect_locate = result
+        self.auto_progress.setVisible(False)
+        self.auto_progress.setRange(0, 100)
+        self._set_action_buttons_enabled(True)
+        for note in result.notes:
+            self._log(note)
+        if result.tumor_detected:
+            loc = result.location_cm
+            trust = "trusted" if result.location_trusted else "indicative only"
+            if loc is not None:
+                msg = (
+                    f"Tumour detected (p={result.tumor_probability:.3f}). "
+                    f"Location ({loc[0]:.2f}, {loc[1]:.2f}) cm — {trust}."
+                )
+            else:
+                msg = f"Tumour detected (p={result.tumor_probability:.3f}); localization missing."
+            self.status_label.setText(msg)
+            self._log(msg)
+            self._plot_detect_locate_result(result)
+            self.content_tabs.setCurrentIndex(0)
+        else:
+            msg = (
+                f"No tumour flagged (p={result.tumor_probability:.3f}) — "
+                "localization skipped."
+            )
+            self.status_label.setText(msg)
+            self._log(msg, "WARN")
+
+    def _plot_detect_locate_result(self, result: DetectLocateResult) -> None:
+        loc = result.localization_details or {}
+        image = loc.get("image")
+        x_span = loc.get("x_span")
+        y_span = loc.get("y_span")
+        if image is None or x_span is None or y_span is None:
+            return
+        pred_m = loc.get("location_m")
+        tumor_xy = self._tumor_xy_m(self._dataset_for_reconstruction() or self.dataset)
+        self.selected_figure.clear()
+        ax = self.selected_figure.add_subplot(1, 1, 1)
+        title = "Detect & Locate — DAS (Week 3)"
+        if result.location_trusted is False:
+            title += " [indicative]"
+        im = self._configure_image_axes(ax, image, title, x_span=x_span, y_span=y_span)
+        if pred_m is not None:
+            ax.plot(
+                pred_m[0] * 100.0,
+                pred_m[1] * 100.0,
+                marker="o",
+                markersize=10,
+                markerfacecolor="none",
+                markeredgewidth=2.0,
+                color="cyan",
+                label="Predicted",
+            )
+        if tumor_xy is not None:
+            ax.plot(
+                tumor_xy[0] * 100.0,
+                tumor_xy[1] * 100.0,
+                marker="x",
+                markersize=10,
+                markeredgewidth=2.0,
+                color="lime",
+                label="Tumor GT",
+            )
+        ax.legend(loc="upper right", fontsize=8)
+        self.selected_figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        finish_figure(self.selected_figure)
+        self.selected_canvas.draw()
+        self.last_images = {"DAS": image}
 
     def _on_auto_finished(self, result: AutoCalibrateResult) -> None:
         self.last_auto_result = result
@@ -605,8 +743,7 @@ class ReconstructionPanel(QWidget):
                 f" (baseline {result.baseline.tumor_gt_distance_m * 100:.2f} cm)"
             )
 
-        self.run_button.setEnabled(True)
-        self.auto_tweak_button.setEnabled(True)
+        self._set_action_buttons_enabled(True)
         self.auto_progress.setVisible(False)
         self.content_tabs.setCurrentWidget(self.auto_tweak_tab)
 

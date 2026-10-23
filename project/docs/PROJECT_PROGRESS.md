@@ -164,6 +164,7 @@ Scan → classification (tumour?) → if yes → Week 3 DAS smoothed-peak (where
 
 - Library: `automation/detect_locate.py` (`detect_and_locate`)
 - CLI: `python tools/detect_and_locate_one.py <cube.mat> --scan N`
+- GUI: Reconstruction page → **Detect & Locate** (cyan = prediction, lime × = GT when labelled)
 - Detection accuracy stays the fair-test scores below; localization stays ~2.2 cm median (blind, grouped). Combining does not raise either number — it runs them in sequence.
 
 ## Tumour classification (current)
