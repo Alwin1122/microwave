@@ -178,7 +178,7 @@ class TestROIDetector(unittest.TestCase):
             y_span=y_span,
         )
         self.assertGreaterEqual(len(rois), 2)
-        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=tumor_xy)
+        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=tumor_xy, select_by_gt=True)
         self.assertGreater(evaluated.localization_roi.centroid[0], 40.0)
 
     def test_prior_spot_prefers_near_gt_over_window_edge_clutter(self):
@@ -204,7 +204,7 @@ class TestROIDetector(unittest.TestCase):
             y_span=y_span,
         )
         self.assertGreaterEqual(len(rois), 2)
-        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=tumor_xy)
+        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=tumor_xy, select_by_gt=True)
         self.assertGreater(evaluated.localization_roi.centroid[0], 44.0)
         self.assertGreater(evaluated.localization_roi.centroid[1], 44.0)
 
@@ -218,6 +218,51 @@ class TestROIDetector(unittest.TestCase):
         image[46:49, 16:19] += 1.6
         rois = detect_rois(image, threshold_ratio=0.55, min_area=4, margin=1, sigma=0.5, max_rois=4)
         self.assertGreaterEqual(len(rois), 2)
+
+    def test_evaluate_rois_is_blind_by_default(self):
+        """GT is for scoring only: the localization ROI is the top-ranked one."""
+        from roi.roi_detector import detect_rois, evaluate_rois
+
+        image = np.zeros((48, 48), dtype=float)
+        image[8:12, 8:12] = 5.0    # strongest hotspot -> top-ranked ROI
+        image[36:40, 36:40] = 3.0  # weaker hotspot near the ground truth
+        x_span = (-0.06, 0.06)
+        y_span = (-0.06, 0.06)
+        rois = detect_rois(image, threshold_ratio=0.4, min_area=4, x_span=x_span, y_span=y_span)
+        self.assertGreaterEqual(len(rois), 2)
+        evaluated = evaluate_rois(image, rois, x_span, y_span, tumor_xy_m=(0.03, 0.03))
+        self.assertIs(evaluated.localization_roi, evaluated.rois[0])
+        self.assertLess(evaluated.localization_roi.centroid[0], 20.0)
+        # gt_distance_cm scores the blind centroid, so it stays large here.
+        self.assertGreater(evaluated.gt_distance_cm, 3.0)
+
+    def test_peak_prominence_confidence_focused_vs_diffuse(self):
+        from roi.roi_detector import peak_prominence_confidence
+
+        focused = np.zeros((48, 48), dtype=float)
+        focused[22:26, 22:26] = 1.0
+        diffuse = np.full((48, 48), 1.0) + np.random.default_rng(0).normal(0, 0.01, (48, 48))
+        self.assertGreater(
+            peak_prominence_confidence(focused), peak_prominence_confidence(diffuse)
+        )
+        self.assertAlmostEqual(peak_prominence_confidence(diffuse), 1.0, delta=0.1)
+
+    def test_nearest_bmid_slot(self):
+        from reconstruction.bmid_geometry import BMID_TUMOR_SLOTS_M, nearest_bmid_slot_m
+
+        self.assertEqual(len(BMID_TUMOR_SLOTS_M), 4)
+        self.assertEqual(nearest_bmid_slot_m((0.03, -0.03)), (0.0225, -0.0225))
+        self.assertEqual(nearest_bmid_slot_m((-0.05, 0.01)), (-0.0225, 0.0225))
+
+    def test_smoothed_peak_centroid_finds_blob(self):
+        from roi.roi_detector import smoothed_peak_centroid_m
+
+        image = np.zeros((48, 48), dtype=float)
+        image[30:34, 14:18] = 1.0
+        image[16, 16] = 5.0  # single-pixel spike must not win over the blob
+        x, y = smoothed_peak_centroid_m(image, (-0.06, 0.06), (-0.06, 0.06))
+        self.assertLess(abs(x - (-0.02)), 0.01)
+        self.assertLess(abs(y - 0.02), 0.01)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from reconstruction.reconstruction_manager import (
     reconstruct_all,
     reconstruct_high_resolution_roi,
 )
-from roi.roi_detector import detect_rois, evaluate_rois
+from roi.roi_detector import detect_rois, evaluate_rois, smoothed_peak_centroid_m
 from utils.exceptions import MicrowaveFrameworkError
 
 ProgressCb = Callable[[str], None]
@@ -208,7 +208,7 @@ def validate_one_target(
             tight_peak=False,
             x_span=config.x_span,
             y_span=config.y_span,
-            prior_xy_m=tumor_xy,
+            prior_xy_m=None,  # blind: GT only scores the prediction afterwards
             prior_weight=0.0,
             max_rois=4,
             min_score_ratio=0.28,
@@ -230,8 +230,12 @@ def validate_one_target(
             config=config,
             min_grid_size=96,
         )
-        centroid_m = evaluated.localization_centroid_m
-        gt_dist_cm = evaluated.gt_distance_cm
+        centroid_m = smoothed_peak_centroid_m(image, config.x_span, config.y_span)
+        gt_dist_cm = (
+            None
+            if tumor_xy is None
+            else float(np.hypot(centroid_m[0] - tumor_xy[0], centroid_m[1] - tumor_xy[1]) * 100.0)
+        )
         candidate = evaluated.combined
         char = characterize_tumor_region(
             image, roi, x_span=config.x_span, y_span=config.y_span, centroid_m=centroid_m

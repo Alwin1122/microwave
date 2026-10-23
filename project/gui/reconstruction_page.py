@@ -37,20 +37,28 @@ from reconstruction.auto_calibrate import (
     auto_calibrate_reconstruction,
 )
 from reconstruction.reconstruction_manager import (
+    WEEK3_TIME_KEYS,
     ROIRefinement,
     infer_reconstruction_assessment,
     infer_reconstruction_config,
+    preferred_week3_key,
     reconstruct_all,
+    reconstruct_all_from_time,
     reconstruct_high_resolution_roi,
+    week3_time_inputs,
 )
 from quality.characterization import characterize_tumor_region
 from quality.confidence import assess_reconstruction_confidence
 from quality.tumor_taxonomy import taxonomy_from_metadata
 from reconstruction.ifft import frequency_to_time, time_axis_seconds
+from reconstruction.bmid_geometry import nearest_bmid_slot_m
 from roi.roi_detector import (
+    PROMINENCE_TRUST_THRESHOLD,
     ROIResult,
     detect_rois,
     evaluate_rois,
+    peak_prominence_confidence,
+    smoothed_peak_centroid_m,
 )
 from utils.logger import StatusLog, get_logger
 from utils.session_report import ReconstructionSnapshot
@@ -278,6 +286,15 @@ class ReconstructionPanel(QWidget):
             "Rotational mean subtracts the response shared by all antennas (skin, antenna ring)."
         )
         imaging_form.addRow("Clutter removal", self.clutter_combo)
+        self.imaging_input_combo = QComboBox()
+        self.imaging_input_combo.addItems(
+            ["Filtered S21 (frequency)"] + list(WEEK3_TIME_KEYS.values())
+        )
+        self.imaging_input_combo.setToolTip(
+            "Week 3 options image the Module 2 time-domain signals directly "
+            "(no second IFFT). Auto-selected when a processed dataset carries Week 3 data."
+        )
+        imaging_form.addRow("Imaging input", self.imaging_input_combo)
         self.auto_quick_check = QCheckBox("Quick Auto Tweak search")
         self.auto_quick_check.setChecked(True)
         imaging_form.addRow("", self.auto_quick_check)
@@ -448,7 +465,50 @@ class ReconstructionPanel(QWidget):
 
     def set_processed_dataset(self, dataset: MicrowaveDataset) -> None:
         self.processed_dataset = dataset
-        self._log("Processed dataset available for reconstruction.")
+        key = preferred_week3_key(dataset)
+        if key is not None:
+            self.imaging_input_combo.setCurrentText(WEEK3_TIME_KEYS[key])
+            # Validated prediction path (BMID gen1 held-out): Week 3 + DAS
+            # (gamma 0.55 via quality pick) + Peak ROI. DMAS variants, SVD
+            # clutter, gating, bias and geometry retunes all lost held-out.
+            self.beamformer_mode_combo.setCurrentText("Quality score")
+            self.roi_mode_combo.setCurrentText("Peak score")
+            self._log(
+                f"Processed dataset available; imaging input set to {WEEK3_TIME_KEYS[key]} "
+                "(validated Week 3 + DAS + Peak ROI prediction path)."
+            )
+            self._log(
+                "Prediction = coarse tumour localization only (BMID gen1 held-out: "
+                "median ROI error ~1.8 cm, ~94% within 3 cm); the image alone does "
+                "not detect tumour presence (contrast AUC ~0.5).",
+                "WARN",
+            )
+        else:
+            self.imaging_input_combo.setCurrentText("Filtered S21 (frequency)")
+            self._log("Processed dataset available for reconstruction.")
+
+    def _selected_week3_key(self) -> str | None:
+        label = self.imaging_input_combo.currentText()
+        for key, text in WEEK3_TIME_KEYS.items():
+            if text == label:
+                return key
+        return None
+
+    def _resolve_time_input(self, dataset):
+        """Return (time_signals, label, already_clutter_removed) for Week 3 selections."""
+        key = self._selected_week3_key()
+        if key is None:
+            return None, None, False
+        available = week3_time_inputs(dataset)
+        if key not in available:
+            self._log(
+                f"{WEEK3_TIME_KEYS[key]} not available for this dataset; "
+                "using Filtered S21 (frequency). Run Module 2 with Week 3 enabled first.",
+                "WARN",
+            )
+            return None, None, False
+        already = key in ("time_clutter_removed", "time_global_normalized")
+        return available[key], WEEK3_TIME_KEYS[key], already
 
     def on_run_clicked(self) -> None:
         if self.dataset is None:
@@ -689,21 +749,36 @@ class ReconstructionPanel(QWidget):
         tight_peak = self.roi_mode_combo.currentText() == "Tight peak"
         beamformer_mode = self._selected_beamformer_mode()
 
-        images, timings = reconstruct_all(
-            s_params,
-            freqs,
-            config=config,
-            return_timings=True,
-        )
-        try:
-            time_signals = frequency_to_time(
-                s_params, freqs, zero_padding=config.zero_padding
+        week3_signals, week3_label, week3_clutter_done = self._resolve_time_input(dataset)
+        if week3_signals is not None and week3_clutter_done and config.clutter_removal != "none":
+            config.clutter_removal = "none"
+            self._log("Week 3 signal already clutter-removed; rotational-mean not applied twice.")
+        if week3_signals is not None:
+            self._log(f"Imaging input: {week3_label} {week3_signals.shape} (no second IFFT).")
+            images, timings = reconstruct_all_from_time(
+                week3_signals, freqs, config=config, return_timings=True,
             )
-            time_s = time_axis_seconds(freqs, time_signals.shape[0])
-        except Exception as exc:
-            self._log(f"IFFT intermediate plot skipped: {exc}")
-            time_signals = None
-            time_s = None
+            time_signals = week3_signals
+            try:
+                time_s = time_axis_seconds(freqs, time_signals.shape[0])
+            except Exception:
+                time_s = None
+        else:
+            images, timings = reconstruct_all(
+                s_params,
+                freqs,
+                config=config,
+                return_timings=True,
+            )
+            try:
+                time_signals = frequency_to_time(
+                    s_params, freqs, zero_padding=config.zero_padding
+                )
+                time_s = time_axis_seconds(freqs, time_signals.shape[0])
+            except Exception as exc:
+                self._log(f"IFFT intermediate plot skipped: {exc}")
+                time_signals = None
+                time_s = None
         self.last_time_signals = time_signals
         self.last_time_axis = time_s
         self.last_images = images
@@ -725,7 +800,7 @@ class ReconstructionPanel(QWidget):
             tight_peak=tight_peak,
             x_span=config.x_span,
             y_span=config.y_span,
-            prior_xy_m=tumor_xy,
+            prior_xy_m=None,  # blind: GT must not seed or select the prediction
             prior_weight=0.0,
             max_rois=4,
             min_score_ratio=0.28,
@@ -746,13 +821,41 @@ class ReconstructionPanel(QWidget):
             images[selected_name].shape,
             config=config,
             min_grid_size=max(96, config.n_x),
+            time_signals=week3_signals,
         )
         self.last_roi_result = roi_result
         self.last_roi_results = list(evaluated.rois)
         self.last_roi_refinement = refinement
 
-        centroid_m = evaluated.localization_centroid_m
-        gt_distance = None if evaluated.gt_distance_cm is None else evaluated.gt_distance_cm / 100.0
+        # Maximized blind predictor: smoothed image peak (held-out median
+        # 1.82 cm) instead of the blob centroid (3.21 cm); GT scores it only.
+        centroid_m = smoothed_peak_centroid_m(
+            images[selected_name], config.x_span, config.y_span
+        )
+        gt_distance = (
+            None
+            if tumor_xy is None
+            else float(np.hypot(centroid_m[0] - tumor_xy[0], centroid_m[1] - tumor_xy[1]))
+        )
+        self._log(
+            f"Blind prediction (smoothed peak): ({centroid_m[0] * 100:.2f}, {centroid_m[1] * 100:.2f}) cm"
+            + (f"; GT distance {gt_distance * 100:.2f} cm." if gt_distance is not None else ".")
+        )
+        prominence = peak_prominence_confidence(images[selected_name])
+        meta_now = dataset.metadata or {}
+        if str(meta_now.get("dataset_family", "")).upper() == "UM-BMID":
+            slot_m = nearest_bmid_slot_m(centroid_m)
+            self._log(
+                f"BMID phantom slot nearest prediction: ({slot_m[0] * 100:.2f}, {slot_m[1] * 100:.2f}) cm "
+                "(protocol prior, reporting aid only)."
+            )
+        if prominence >= PROMINENCE_TRUST_THRESHOLD:
+            self._log(f"Prediction confidence: prominence {prominence:.2f} (focused peak).")
+        else:
+            self._log(
+                f"Prediction confidence: prominence {prominence:.2f} below {PROMINENCE_TRUST_THRESHOLD:.1f} "
+                "— diffuse image; treat the position as indicative only."
+            )
         candidate = evaluated.combined
         characterization = characterize_tumor_region(
             images[selected_name],

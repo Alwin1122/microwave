@@ -675,14 +675,57 @@ def classify_tumor_candidate(
     )
 
 
+def smoothed_peak_centroid_m(
+    image: np.ndarray,
+    x_span: tuple[float, float],
+    y_span: tuple[float, float],
+    sigma_px: float = 2.0,
+) -> tuple[float, float]:
+    """Position (m) of the maximum of the Gaussian-smoothed image.
+
+    Blind predictor (no ground truth): on held-out BMID scans this beat the
+    top-ROI centroid (median 1.82 cm vs 3.21 cm), because blob centroids are
+    dragged by elongated clutter tails while the smoothed peak is not.
+    """
+    arr = np.asarray(image, dtype=float)
+    smooth = gaussian_filter(arr, sigma=float(sigma_px)) if sigma_px > 0 else arr
+    iy, ix = np.unravel_index(int(np.argmax(smooth)), smooth.shape)
+    return _pixel_to_meters(float(ix), float(iy), arr.shape, x_span, y_span)
+
+
+# BMID-calibrated (grouped held-out phantoms, Step 15): prominence >= 3.0 ->
+# slot accuracy 70% / median 1.82 cm; below -> 52% / 3.18 cm. Indicative only.
+PROMINENCE_TRUST_THRESHOLD = 3.0
+
+
+def peak_prominence_confidence(image: np.ndarray, sigma_px: float = 2.0) -> float:
+    """Train-free confidence for the smoothed-peak prediction.
+
+    Smoothed peak divided by the median smoothed value: a lone strong focus
+    scores high, diffuse clutter scores near 1. Compare against
+    `PROMINENCE_TRUST_THRESHOLD`; below it the position is indicative only.
+    """
+    arr = np.asarray(image, dtype=float)
+    smooth = gaussian_filter(arr, sigma=float(sigma_px)) if sigma_px > 0 else arr
+    return float(smooth.max() / (np.median(smooth) + _EPS))
+
+
 def evaluate_rois(
     image: np.ndarray,
     rois: list[ROIResult],
     x_span: tuple[float, float],
     y_span: tuple[float, float],
     tumor_xy_m: tuple[float, float] | None = None,
+    select_by_gt: bool = False,
 ) -> MultiROIEvaluation:
-    """Classify every detected hotspot and keep the closest-to-GT localization."""
+    """Classify every detected hotspot and localize **blindly** by default.
+
+    The localization ROI is the top-ranked ROI. Ground truth, when given, is
+    used only to score that blind prediction (`gt_distance_cm` = distance of
+    the blind centroid). Pass `select_by_gt=True` only for lab-only analysis
+    that intentionally keeps the closest-to-GT candidate; that mode is an
+    oracle and must never be reported as prediction accuracy.
+    """
     if not rois:
         raise ValueError("evaluate_rois requires at least one ROI.")
 
@@ -700,11 +743,13 @@ def evaluate_rois(
             gt_cm = float(
                 np.hypot(centroid_m[0] - tumor_xy_m[0], centroid_m[1] - tumor_xy_m[1]) * 100.0
             )
-            if best_dist is None or gt_cm < best_dist:
+            if select_by_gt and (best_dist is None or gt_cm < best_dist):
                 best_dist = gt_cm
                 loc_roi = roi
                 loc_centroid = centroid_m
-        cand = classify_tumor_candidate(image, roi, gt_distance_cm=gt_cm)
+        cand = classify_tumor_candidate(
+            image, roi, gt_distance_cm=gt_cm if select_by_gt else None
+        )
         candidates.append(cand)
         summaries.append(
             {
@@ -738,6 +783,10 @@ def evaluate_rois(
         },
     )
     primary = rois[0]
+    if tumor_xy_m is not None and not select_by_gt:
+        best_dist = float(
+            np.hypot(loc_centroid[0] - tumor_xy_m[0], loc_centroid[1] - tumor_xy_m[1]) * 100.0
+        )
     return MultiROIEvaluation(
         rois=list(rois),
         primary=primary,

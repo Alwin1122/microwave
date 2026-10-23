@@ -15,13 +15,17 @@ from reconstruction.dmas import (
 from reconstruction.dmas_d4 import DEFAULT_DMAS_D4_EXPONENT, dmas_d4_reconstruct
 from reconstruction.reconstruction_manager import (
     ROIRefinement,
+    ReconstructionConfig,
     bmid_phase_delayed_radius,
     build_circular_antenna_array,
     infer_reconstruction_assessment,
     infer_reconstruction_config,
+    preferred_week3_key,
     reconstruct_all,
+    reconstruct_all_from_time,
     reconstruct_high_resolution_roi,
     select_best_reconstruction,
+    week3_time_inputs,
 )
 from data_loader.dataset_info import MicrowaveDataset
 
@@ -161,6 +165,50 @@ class TestBeamforming(unittest.TestCase):
             peak_y, peak_x = np.unravel_index(int(np.argmax(np.abs(image))), image.shape)
             error = np.hypot(axis[peak_x] - target_xy[0], axis[peak_y] - target_xy[1])
             self.assertLess(error, 0.002, name)
+
+    def test_time_domain_path_matches_frequency_path(self):
+        cfg = ReconstructionConfig(x_span=(-0.02, 0.02), y_span=(-0.02, 0.02), n_x=16, n_y=16)
+        from_freq = reconstruct_all(self.data, self.freqs, config=cfg)
+        from_time = reconstruct_all_from_time(self.time_data, self.freqs, config=cfg)
+        self.assertEqual(set(from_time), {"DAS", "DMAS", "DMAS-D4"})
+        for name in from_freq:
+            np.testing.assert_allclose(from_time[name], from_freq[name], rtol=1e-9, atol=1e-12)
+
+    def test_week3_metadata_helpers_and_localization(self):
+        freqs = np.linspace(1e9, 8e9, 256)
+        antenna_positions = build_circular_antenna_array(12, radius=0.08)
+        target_xy = (0.012, -0.008)
+        data = _make_point_target_frequency_data(freqs, antenna_positions, target_xy)
+        from preprocessing.week3_time_domain import process_week3_time_domain
+
+        week3 = process_week3_time_domain(freqs, data)
+        dataset = MicrowaveDataset(
+            file_path="synthetic.mat", file_name="synthetic.mat", file_type="MATLAB",
+            frequencies=freqs, s_parameters=data, n_ports=12,
+            metadata={"module2_week3": {
+                "time_hamming": week3.time_hamming,
+                "time_clutter_removed": week3.time_clutter_removed,
+                "time_global_normalized": week3.time_global_normalized,
+            }},
+        )
+        self.assertEqual(preferred_week3_key(dataset), "time_clutter_removed")
+        inputs = week3_time_inputs(dataset)
+        self.assertIn("time_hamming", inputs)
+        cfg = ReconstructionConfig(x_span=(-0.03, 0.03), y_span=(-0.03, 0.03), n_x=41, n_y=41)
+        images = reconstruct_all_from_time(inputs["time_hamming"], freqs, config=cfg)
+        axis = np.linspace(-0.03, 0.03, 41)
+        for name, image in images.items():
+            self.assertTrue(np.all(np.isfinite(image)), name)
+            peak_y, peak_x = np.unravel_index(int(np.argmax(np.abs(image))), image.shape)
+            error = np.hypot(axis[peak_x] - target_xy[0], axis[peak_y] - target_xy[1])
+            self.assertLess(error, 0.004, name)
+        refinement = reconstruct_high_resolution_roi(
+            data, freqs, "DAS", bounding_box=(15, 15, 25, 25), coarse_shape=(41, 41),
+            config=cfg, min_grid_size=32, max_grid_size=64,
+            time_signals=inputs["time_hamming"],
+        )
+        self.assertIsInstance(refinement, ROIRefinement)
+        self.assertTrue(np.all(np.isfinite(refinement.image)))
 
     def test_cohort_average_defaults(self):
         self.assertAlmostEqual(DEFAULT_DAS_COHERENCE_GAMMA, 0.55)

@@ -42,6 +42,21 @@ def generation_from_path(path: str) -> str | None:
     return _NAME_TO_GEN.get(token, f"gen{token}")
 
 
+# Phantom-protocol tumour slots (m): every labelled BMID tumour scan places
+# the tumour at one of (±2.25, ±2.25) cm. Phantom-specific prior — useful for
+# reporting slot accuracy on BMID, NOT a clinical prior. See Step 15.
+BMID_TUMOR_SLOTS_M = np.array(
+    [[-0.0225, -0.0225], [-0.0225, 0.0225], [0.0225, -0.0225], [0.0225, 0.0225]]
+)
+
+
+def nearest_bmid_slot_m(point_m: tuple[float, float]) -> tuple[float, float]:
+    """Nearest BMID phantom tumour slot (m) to a predicted point (m)."""
+    point = np.asarray(point_m, dtype=float)
+    slot = BMID_TUMOR_SLOTS_M[int(np.argmin(np.hypot(*(BMID_TUMOR_SLOTS_M - point).T)))]
+    return float(slot[0]), float(slot[1])
+
+
 def remove_rotational_mean(s_parameters: np.ndarray) -> np.ndarray:
     """Subtract the average over antennas; cancels anything that looks the same from every angle."""
     data = np.asarray(s_parameters)

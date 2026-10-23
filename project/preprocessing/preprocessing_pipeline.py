@@ -325,6 +325,8 @@ def run_preprocessing_pipeline(
             processed_dataset.metadata["module2_week3"] = {
                 "time_s": week3_result.time_s,
                 "delta_t_s": week3_result.delta_t_s,
+                "s21_hamming": week3_result.s21_hamming,
+                "s21_reference_subtracted_freq": week3_result.s21_reference_subtracted_freq,
                 "time_hamming": week3_result.time_hamming,
                 "time_reference_subtracted": week3_result.time_reference_subtracted,
                 "time_clutter_removed": week3_result.time_clutter_removed,
@@ -462,6 +464,8 @@ def run_preprocessing_pipeline(
             processed_dataset.metadata["module2_week3"] = {
                 "time_s": week3_result.time_s,
                 "delta_t_s": week3_result.delta_t_s,
+                "s21_hamming": week3_result.s21_hamming,
+                "s21_reference_subtracted_freq": week3_result.s21_reference_subtracted_freq,
                 "time_hamming": week3_result.time_hamming,
                 "time_clutter_removed": week3_result.time_clutter_removed,
                 "time_global_normalized": week3_result.time_global_normalized,

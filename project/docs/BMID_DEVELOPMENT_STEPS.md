@@ -242,3 +242,151 @@ scans (AUC ≈ 0.5 for every setting): the images help localise a known tumour, 
 |----------|-----------------|----------|--------|
 | old (none, 3e8) | 4.45 cm | 0 % | 8 % |
 | new (rot-mean, 2.1e8) | **1.96 cm** | 9 % | **80 %** |
+
+> ⚠️ **Correction (Step 14):** this table — and the ROI numbers in Step 13 — were measured with
+> GT-assisted ROI selection (`evaluate_rois` picked the candidate closest to the known tumour).
+> They are **oracle** numbers, not blind predictions. Blind numbers are in Step 14.
+
+---
+
+## Step 13 — Solving the remaining prediction error (attempts + verdict)
+
+Week 3 is now the Module 3 imaging input (`reconstruct_all_from_time`, GUI **Imaging input**
+auto-select). Error diagnostic (100 tumour scans, DAS peak): median 2.41 cm, peak x-position
+correlation with GT ≈ 0.00, bias +1.6/+0.9 cm — the focus is clutter-dominated and resolution-limited
+(\(c/2B \approx 1.5\) cm at \(c=2.1\times10^8\), B = 7 GHz; median tumour diameter 2 cm).
+
+Candidate fixes, tuned on 24 scans and verified on held-out 76 (DAS, FOV ±6 cm, ROI prediction).
+**Note:** the ROI column below used GT-assisted candidate selection — see the Step 14 correction.
+The *ranking* of fixes (nothing beat the kept path) was re-checked blind and still holds.
+
+| Fix tried | Tuning ROI median | Held-out ROI median / ≤ 3 cm | Verdict |
+|-----------|-------------------|------------------------------|---------|
+| **Week 3 clutter-removed + DAS (γ=0.55) + Peak ROI (kept)** | 1.96 cm | **1.77 cm / 100 %** (≤1.5 cm: 22 %) | **kept as prediction path** |
+| SVD low-rank clutter (rank 1–3) | 2.22–2.48 cm | not promoted | worse |
+| Time gate 0.6 / 0.9 ns | 1.96 cm | identical to baseline | no effect (all pixel delays > 1.1 ns) |
+| Constant bias correction | — | 1.77 → 2.22 cm | bias unstable across scans |
+| Coherent DAS, DMAS, DAS γ=0 / γ=1, weighted centroid | 2.28–3.52 cm | 2.00–3.19 cm | worse |
+| Geometry retune (angle 90°, c=2.0e8) | peak-best on tuning | ROI 2.36 cm / 74 % | tuning overfit |
+| Freq + Week 3 ensemble, zero-padding ×3, image² | 2.38–2.96 cm | 1.87–2.66 cm | worse |
+| High-res ROI refinement re-centroid | 1.86 cm | 1.78 cm / 100 % | no gain |
+
+**Conclusion:** the kept path is already the best available on this data. Remaining error is
+intrinsic: residual angle-dependent clutter, monostatic \(2d/c\) + constant-\(c\) model, and the
+~1.5 cm resolution cell. Detection (tumour vs healthy) is **not** solved by imaging
+(contrast AUC ≈ 0.5; classification model AUC ≈ 0.66). Further gains need new information, not
+new knobs: an empty-reference (`_emp`) frequency cube, confirmed Tx–Rx (bistatic) geometry, or
+frequency-dependent phase-centre/speed calibration. GUI now auto-selects this path with Week 3
+data and logs the localization-only reliability warning.
+
+---
+
+## Step 14 — Oracle-leakage fix: blind prediction is now the default (and the honest headline)
+
+**Problem found.** The ROI evaluation used the ground truth to choose the answer:
+`evaluate_rois(..., tumor_xy_m=GT)` selected the candidate ROI *closest to GT* as the
+localization ROI, `classify_tumor_candidate` boosted confidence from GT distance, and
+`detect_rois(prior_xy_m=GT)` (passed by the GUI and automation, even with `prior_weight=0.0`)
+kept the GT-nearest hotspot via `_ensure_prior_spot`. Every "ROI ↔ GT" number in Steps 12–13
+was therefore partly GT-assisted — an oracle upper bound, not a prediction.
+
+**Fix (code).**
+- `roi/roi_detector.py::evaluate_rois` is **blind by default**: localization ROI = top-ranked
+  candidate, candidates classified without GT, `gt_distance_cm` scores the blind centroid.
+  `select_by_gt=True` keeps the old behaviour for lab-only analysis and is labelled as such.
+- New `smoothed_peak_centroid_m(image, x_span, y_span, sigma_px=2.0)`: Gaussian-smoothed image
+  peak in metres — the best blind point predictor found (blob centroids are dragged by the
+  clutter ring; a smoothed peak is not).
+- GUI (`gui/reconstruction_page.py`) and automation (`automation/pipeline.py`) now call
+  `detect_rois(prior_xy_m=None)` and report the smoothed-peak centroid as the prediction;
+  GT is only used afterwards to print/score the error.
+
+**Blind results** (BMID gen1, DAS on Week 3 clutter-removed, 48-grid, FOV ±6 cm;
+`_scratch/maximize_blind_final.py`, production code paths):
+
+| Predictor (blind) | Tuning 24 median | Held-out 76 median | Held-out ≤ 3 cm | Held-out ≤ 1.5 cm |
+|-------------------|------------------|--------------------|-----------------|-------------------|
+| Centre guess | — | 3.18 cm | — | — |
+| Top-ranked ROI centroid | 3.77 cm | 3.92 cm | 38 % | 3 % |
+| **Smoothed peak (locked)** | 3.05 cm | **1.82 cm** | **70 %** | **14 %** |
+| Oracle ROI (Steps 12–13, for reference) | 1.96 cm | 1.77 cm | 100 % | 22 % |
+
+Also tried blind and rejected on held-out: candidate re-ranking by confidence/suspicion,
+off-centre/tight ROI modes, weighted centroids, DAS γ = 0.8/1.0, sub-band (3–5 GHz) and
+all-band image ensembles, peak consensus across beamformers.
+
+**Honest headline for the report:** on unseen BMID tumour scans the system predicts the tumour
+centre with **median error 1.82 cm, 70 % within 3 cm** — close to the \(c/2B \approx 1.5\) cm
+resolution cell. Detection (tumour vs healthy) remains unsolved (AUC ≈ 0.5 imaging,
+≈ 0.66 pooled classifier, 0.495 gen1-only). The gap between the blind 1.82 cm and the oracle
+1.77 cm median is small, but the oracle's 100 % ≤ 3 cm was not achievable blind (70 %). 
+166 unit tests pass, including new blind-default and smoothed-peak tests.
+
+---
+
+## Step 15 — Solving the solvable problems, one by one (grouped-split verdicts)
+
+**Protocol upgrade first.** The Step 14 split (first 24 scans vs rest) shares phantoms between
+sets. BMID structure: each phantom carries its tumour at exactly **one** of 4 slots,
+\((\pm2.25, \pm2.25)\) cm, with phantom counts per slot {0: 14, 1: 3, 2: 2, 3: 1} × 5 scans —
+so slot 0 alone is 70 % of scans ("always slot 0" scores 70 % overall; use **balanced**
+accuracy). All steps below use phantom-disjoint splits (Step A/B) or leave-one-phantom-out
+(LOPO, Step B classifiers). Scripts: `_scratch/stepA…stepF*.py`; images cached in
+`_scratch/grouped_images.npz`.
+
+| Step | Idea | Grouped held-out result | Verdict |
+|------|------|-------------------------|---------|
+| A | Phantom-grouped benchmark, Week 3 vs frequency DAS | Week 3: **2.20 cm / 69 % ≤3 cm**; freq: 2.91 cm / 52 % | Week 3 lock **confirmed** under strict split (file-order 1.82 cm was slightly optimistic) |
+| B | Slot classifier (snap / slot-energy / logistic regression, LOPO) | snap balanced 45 % (best); logreg overall 68 % ≈ majority baseline, balanced 33 %, slots 2–3 at 0 % | Classifier **rejected** (minority slots unlearnable: 1–2 phantoms each) |
+| B | Confidence gating (logreg probability, LOPO) | top-50 % coverage: slot-acc 68 % → **84 %**, median 1.85 cm | Concept **validated**; shipped train-free version (below) |
+| C | Healthy-surrogate reference (same-phantom healthy mean into Week 3) | 2.97 cm / 51 % vs control 2.20 / 69 % | **Rejected** — session mismatch adds clutter |
+| D | Phase-delay radius ON | 4.46 cm / 17 % vs OFF 2.20 / 69 % | **Rejected** — default OFF validated blind |
+| E | True `_emp` empty-reference cube | Exhaustive automatic search: Drive gen-two `_emp` downloaded (1.16 GB) — signal matching proved our scans are **not** in it (0/100). Zenodo/DataPort `gen-one.zip` downloaded (350 MB) — **S11 only**. Drive gen-one/clean listing verified via embedded view — S11 only. TIB mirror DOI withdrawn; HF mirror = official repack. Conclusion: **no public gen-one S21 `_emp` cube exists** (official gen-one is S11-only; our S21 set is a curated 2021 derivative, md dates 20210730) | **Blocked (file does not exist publicly)**; wrong-gen cube quarantined to `_scratch/gen2_fd_data_s21_emp_WRONG_GEN.mat`; `_scratch/stepE_emp_compare.py` ready if the file is ever obtained (e.g. from the course/institution source of the adi set, or rebuilt from gen-one/raw) |
+
+**Shipped from Step B:** train-free `peak_prominence_confidence`
+(`roi/roi_detector.py`, smoothed peak / median; threshold 3.0 calibrated on grouped data:
+above → 70 % slot / 1.82 cm, below → 52 % / 3.18 cm). GUI logs prominence, a low-confidence
+"indicative only" warning, and (BMID only) the nearest phantom slot
+(`reconstruction/bmid_geometry.py::nearest_bmid_slot_m`) as a reporting aid. 168 tests pass.
+
+**Updated honest headline (strictest protocol):** phantom-grouped held-out median **2.20 cm,
+69 % ≤ 3 cm, 13 % ≤ 1.5 cm**; slot-balanced accuracy 45 % (snap). Detection unchanged
+(unsolved). Remaining lever with real upside: Step E's `_emp` cube — but it must come from
+the same source as our curated adi set (the institution/course pack), since no public
+release contains gen-one S21 at all. If obtained, place `fd_data_s21_emp.mat` in
+`project/datasets/` and run `_scratch/stepE_emp_compare.py`.
+
+---
+
+## Step 16 — Gen-two `_emp` vs `_adi` comparison (the file that *does* exist)
+
+Since no public gen-one S21 `_emp` exists, Step E was run on the **official gen-two Drive
+release** (504 tumour pairs matched by scan_id; phantom+GT agree 504/504). Cubes:
+`_scratch/gen2_fd_data_s21_adi.mat` (505×1001×72) and
+`_scratch/gen2_fd_data_s21_emp_WRONG_GEN.mat` (1008×1001×72, quarantined name kept).
+Antenna radius 21–23 cm per scan; FOV ±6.5 cm; Week 3 DAS + smoothed-peak predictor.
+Phantom-grouped split: 76 tune / 428 held-out (4 / 62 phantoms). Scripts:
+`_scratch/gen2_common.py`, `stepG2_tune.py`, `stepG3_heldout.py`.
+
+**Tuning (76 scans)** — each arm prefers a different wave speed:
+
+| Arm | Best c | Orientation | Tuning median |
+|-----|--------|-------------|---------------|
+| adi | 2.1e8 | ccw0 | 3.18 cm |
+| emp | **2.7e8** | ccw0 | **2.73 cm** |
+| emp | 2.1e8 | ccw0 | 5.33 cm (mismatched speed) |
+
+**Held-out (428 phantoms, blind):**
+
+| Predictor | Median | ≤ 3 cm | ≤ 1.5 cm |
+|-----------|--------|--------|----------|
+| Centre guess | 3.18 cm | 39 % | — |
+| adi @ 2.1e8 (adi-tuned) | 3.75 cm | 38 % | 11 % |
+| emp @ 2.7e8 (emp-tuned) | **3.55 cm** | 36 % | 7 % |
+| emp @ 2.1e8 (wrong speed) | 6.14 cm | 7 % | 1 % |
+
+**Verdict:** empty-chamber reference does **not** clearly beat adipose reference on gen-two
+(3.55 vs 3.75 cm — within noise; both ≈ centre guess). Gen-two is harder than our curated
+gen-one set (gen-one Week 3 held-out 2.20 cm). No production lock-in: our primary track
+remains the curated gen-one adi cube, where `_emp` is unavailable. Step E's hoped-for
+clutter win is closed as a negative result on the only generation that has both cubes.

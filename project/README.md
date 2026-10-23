@@ -198,5 +198,10 @@ All framework errors subclass `MicrowaveFrameworkError` (`utils/exceptions.py`).
 
 ## Next work
 
-1. Use Hamming / Week 3 time-domain as the default Module 3 reconstruction input when present.  
-2. Continue BMID localization tuning (see BMID development steps).
+1. Continue BMID localization tuning (see BMID development steps).  
+2. Compare Week 3 time-domain vs filtered-S21 imaging on labelled BMID scans (Ch 5 ablation).
+
+Module 3 now images Module 2 Week 3 time signals directly: when a processed dataset carries
+Week 3 data, the Reconstruction **Imaging input** auto-selects the most-processed Week 3 signal
+(clutter-removed first); filtered S21(f) remains selectable. BMID pass-through is unchanged
+(Week 3 disabled there, so the validated rotational-mean frequency path is used).
