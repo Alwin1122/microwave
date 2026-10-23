@@ -154,6 +154,18 @@ python main.py
 
 ---
 
+## Detect → locate pipeline (combined product flow)
+
+Friend detection + our localization, wired without merging the original feature branches:
+
+```
+Scan → classification (tumour?) → if yes → Week 3 DAS smoothed-peak (where?)
+```
+
+- Library: `automation/detect_locate.py` (`detect_and_locate`)
+- CLI: `python tools/detect_and_locate_one.py <cube.mat> --scan N`
+- Detection accuracy stays the fair-test scores below; localization stays ~2.2 cm median (blind, grouped). Combining does not raise either number — it runs them in sequence.
+
 ## Tumour classification (current)
 
 Official scores on the fair UM-BMID test (a phantom is never in both training and test):
