@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from reconstruction.bmid_geometry import remove_rotational_mean
-from reconstruction.das import DEFAULT_DAS_COHERENCE_GAMMA, das_from_frequency
+from reconstruction.das import DEFAULT_DAS_COHERENCE_GAMMA, das_from_frequency, das_reconstruct
 from reconstruction.dmas import (
     DEFAULT_DMAS_COHERENCE_GAMMA,
     DEFAULT_DMAS_EPS,
@@ -160,6 +160,59 @@ def _build_grid(x_span: tuple[float, float], y_span: tuple[float, float], n_x: i
     return grid_x, grid_y
 
 
+def _reconstruct_single_from_time(
+    algorithm: str,
+    time_signals: np.ndarray,
+    frequencies: np.ndarray,
+    antenna_positions: np.ndarray,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    wave_speed: float = 3e8,
+    config: ReconstructionConfig | None = None,
+) -> np.ndarray:
+    gamma = DEFAULT_DAS_COHERENCE_GAMMA if config is None else float(config.das_coherence_gamma)
+    pair_exp = DEFAULT_DMAS_PAIR_EXPONENT if config is None else float(config.dmas_pair_exponent)
+    dmas_cf = DEFAULT_DMAS_COHERENCE_GAMMA if config is None else float(config.dmas_coherence_gamma)
+    dmas_eps = DEFAULT_DMAS_EPS if config is None else float(config.dmas_eps)
+    d4_exp = DEFAULT_DMAS_D4_EXPONENT if config is None else float(config.dmas_d4_exponent)
+    if algorithm == "DAS":
+        return das_reconstruct(
+            time_signals,
+            frequencies,
+            antenna_positions,
+            grid_x,
+            grid_y,
+            wave_speed=wave_speed,
+            coherence_gamma=gamma,
+        )
+    if algorithm == "DMAS":
+        return dmas_reconstruct(
+            time_signals,
+            frequencies,
+            antenna_positions,
+            grid_x,
+            grid_y,
+            wave_speed=wave_speed,
+            pair_exponent=pair_exp,
+            coherence_gamma=dmas_cf,
+            eps=dmas_eps,
+        )
+    if algorithm == "DMAS-D4":
+        return dmas_d4_reconstruct(
+            time_signals,
+            frequencies,
+            antenna_positions,
+            grid_x,
+            grid_y,
+            wave_speed=wave_speed,
+            pair_exponent=pair_exp,
+            coherence_gamma=dmas_cf,
+            eps=dmas_eps,
+            d4_exponent=d4_exp,
+        )
+    raise ValueError(f"Unsupported beamformer '{algorithm}'.")
+
+
 def _reconstruct_single(
     algorithm: str,
     s_parameters: np.ndarray,
@@ -292,55 +345,107 @@ def reconstruct_all(
             antenna_positions = build_circular_antenna_array(n_traces, radius=antenna_radius)
     grid_x, grid_y = _build_grid(x_span, y_span, n_x=n_x, n_y=n_y)
     time_signals = frequency_to_time(s_parameters, frequencies, zero_padding=zero_padding)
+    return _images_from_time(
+        time_signals, frequencies, antenna_positions, grid_x, grid_y,
+        wave_speed=wave_speed, config=config, return_timings=return_timings,
+    )
 
+
+def _images_from_time(
+    time_signals, frequencies, antenna_positions, grid_x, grid_y,
+    *, wave_speed, config, return_timings,
+):
     images: dict[str, np.ndarray] = {}
     timings: dict[str, float] = {}
-
-    start = time.perf_counter()
-    images["DAS"] = das_from_frequency(
-        s_parameters,
-        frequencies,
-        antenna_positions,
-        grid_x,
-        grid_y,
-        zero_padding=zero_padding,
-        wave_speed=wave_speed,
-        coherence_gamma=DEFAULT_DAS_COHERENCE_GAMMA if config is None else float(config.das_coherence_gamma),
-    )
-    timings["DAS"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    images["DMAS"] = dmas_reconstruct(
-        time_signals,
-        frequencies,
-        antenna_positions,
-        grid_x,
-        grid_y,
-        wave_speed=wave_speed,
-        pair_exponent=DEFAULT_DMAS_PAIR_EXPONENT if config is None else float(config.dmas_pair_exponent),
-        coherence_gamma=DEFAULT_DMAS_COHERENCE_GAMMA if config is None else float(config.dmas_coherence_gamma),
-        eps=DEFAULT_DMAS_EPS if config is None else float(config.dmas_eps),
-    )
-    timings["DMAS"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    images["DMAS-D4"] = dmas_d4_reconstruct(
-        time_signals,
-        frequencies,
-        antenna_positions,
-        grid_x,
-        grid_y,
-        wave_speed=wave_speed,
-        pair_exponent=DEFAULT_DMAS_PAIR_EXPONENT if config is None else float(config.dmas_pair_exponent),
-        coherence_gamma=DEFAULT_DMAS_COHERENCE_GAMMA if config is None else float(config.dmas_coherence_gamma),
-        eps=DEFAULT_DMAS_EPS if config is None else float(config.dmas_eps),
-        d4_exponent=DEFAULT_DMAS_D4_EXPONENT if config is None else float(config.dmas_d4_exponent),
-    )
-    timings["DMAS-D4"] = time.perf_counter() - start
-
+    for name in ("DAS", "DMAS", "DMAS-D4"):
+        start = time.perf_counter()
+        images[name] = _reconstruct_single_from_time(
+            name, time_signals, frequencies, antenna_positions, grid_x, grid_y,
+            wave_speed=wave_speed, config=config,
+        )
+        timings[name] = time.perf_counter() - start
     if return_timings:
         return images, timings
     return images
+
+
+# Week 3 (Module 2) time-domain signals that Module 3 can image directly.
+WEEK3_TIME_KEYS = {
+    "time_hamming": "Week 3 Hamming (time)",
+    "time_reference_subtracted": "Week 3 Ref-subtracted (time)",
+    "time_clutter_removed": "Week 3 Clutter-removed (time)",
+    "time_global_normalized": "Week 3 Global-normalized (time)",
+}
+# Most-processed first: clutter-removed already includes Hamming (+ ref subtract).
+WEEK3_PREFERENCE = (
+    "time_clutter_removed",
+    "time_reference_subtracted",
+    "time_global_normalized",
+    "time_hamming",
+)
+
+
+def week3_time_inputs(dataset) -> dict[str, np.ndarray]:
+    """Return {metadata key: (n_time, n_channels)} Week 3 signals stored on a dataset."""
+    metadata = getattr(dataset, "metadata", {}) or {}
+    week3 = metadata.get("module2_week3") or {}
+    out: dict[str, np.ndarray] = {}
+    for key in WEEK3_TIME_KEYS:
+        value = week3.get(key)
+        if value is None:
+            continue
+        arr = np.asarray(value)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if arr.ndim == 2 and arr.shape[0] >= 2:
+            out[key] = arr
+    return out
+
+
+def preferred_week3_key(dataset) -> str | None:
+    """Best available Week 3 input key (clutter-removed first), or None."""
+    available = week3_time_inputs(dataset)
+    for key in WEEK3_PREFERENCE:
+        if key in available:
+            return key
+    return None
+
+
+def reconstruct_all_from_time(
+    time_signals: np.ndarray,
+    frequencies: np.ndarray,
+    antenna_positions: np.ndarray | None = None,
+    config: ReconstructionConfig | None = None,
+    return_timings: bool = False,
+) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, float]]:
+    """Beamform DAS/DMAS/DMAS-D4 directly from time-domain signals.
+
+    Use for Module 2 Week 3 outputs (Hamming / ref-subtracted / clutter-removed),
+    which are already IFFT'd; re-running an IFFT would be wrong. The rotational-mean
+    clutter setting is applied only when `config.clutter_removal` asks for it —
+    callers imaging an already clutter-removed signal should set it to "none".
+    """
+    time_signals = np.asarray(time_signals)
+    if time_signals.ndim != 2:
+        raise ValueError("time_signals must be 2D (time, traces).")
+    if config is not None:
+        time_signals = apply_clutter_removal(time_signals, config.clutter_removal)
+        x_span, y_span, n_x, n_y = config.x_span, config.y_span, config.n_x, config.n_y
+        wave_speed, antenna_radius = config.wave_speed, config.antenna_radius
+    else:
+        x_span, y_span, n_x, n_y = (-0.05, 0.05), (-0.05, 0.05), 64, 64
+        wave_speed, antenna_radius = 3e8, 0.08
+    n_traces = time_signals.shape[1]
+    if antenna_positions is None:
+        if config is not None:
+            antenna_positions = antenna_positions_from_config(n_traces, config)
+        else:
+            antenna_positions = build_circular_antenna_array(n_traces, radius=antenna_radius)
+    grid_x, grid_y = _build_grid(x_span, y_span, n_x=n_x, n_y=n_y)
+    return _images_from_time(
+        time_signals, frequencies, antenna_positions, grid_x, grid_y,
+        wave_speed=wave_speed, config=config, return_timings=return_timings,
+    )
 
 
 def reconstruct_high_resolution_roi(
@@ -359,8 +464,13 @@ def reconstruct_high_resolution_roi(
     wave_speed: float = 3e8,
     antenna_radius: float = 0.08,
     config: ReconstructionConfig | None = None,
+    time_signals: np.ndarray | None = None,
 ) -> ROIRefinement:
-    """Reconstruct a denser image limited to a previously detected coarse ROI."""
+    """Reconstruct a denser image limited to a previously detected coarse ROI.
+
+    Pass `time_signals` (Module 2 Week 3 output) to refine from the same
+    time-domain input as the coarse image instead of re-IFFT-ing `s_parameters`.
+    """
     if len(coarse_shape) != 2:
         raise ValueError("coarse_shape must be a 2D image shape.")
 
@@ -370,7 +480,10 @@ def reconstruct_high_resolution_roi(
         zero_padding = config.zero_padding
         wave_speed = config.wave_speed
         antenna_radius = config.antenna_radius
-        s_parameters = apply_clutter_removal(s_parameters, config.clutter_removal)
+        if time_signals is None:
+            s_parameters = apply_clutter_removal(s_parameters, config.clutter_removal)
+        else:
+            time_signals = apply_clutter_removal(np.asarray(time_signals), config.clutter_removal)
 
     coarse_ny, coarse_nx = coarse_shape
     x0, y0, x1, y1 = bounding_box
@@ -382,24 +495,30 @@ def reconstruct_high_resolution_roi(
     x_span = _pixel_bbox_to_span(x0, x1, full_x_span, coarse_nx)
     y_span = _pixel_bbox_to_span(y0, y1, full_y_span, coarse_ny)
 
-    n_traces = s_parameters.shape[1]
+    n_traces = time_signals.shape[1] if time_signals is not None else s_parameters.shape[1]
     if antenna_positions is None:
         if config is not None:
             antenna_positions = antenna_positions_from_config(n_traces, config)
         else:
             antenna_positions = build_circular_antenna_array(n_traces, radius=antenna_radius)
     grid_x, grid_y = _build_grid(x_span, y_span, n_x=refined_nx, n_y=refined_ny)
-    refined_image = _reconstruct_single(
-        algorithm,
-        s_parameters,
-        frequencies,
-        antenna_positions,
-        grid_x,
-        grid_y,
-        zero_padding=zero_padding,
-        wave_speed=wave_speed,
-        config=config,
-    )
+    if time_signals is not None:
+        refined_image = _reconstruct_single_from_time(
+            algorithm, time_signals, frequencies, antenna_positions, grid_x, grid_y,
+            wave_speed=wave_speed, config=config,
+        )
+    else:
+        refined_image = _reconstruct_single(
+            algorithm,
+            s_parameters,
+            frequencies,
+            antenna_positions,
+            grid_x,
+            grid_y,
+            zero_padding=zero_padding,
+            wave_speed=wave_speed,
+            config=config,
+        )
 
     return ROIRefinement(
         algorithm=algorithm,

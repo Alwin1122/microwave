@@ -89,7 +89,7 @@ Used for `.mat` and non-`.s2p` loads. For BMID demos: GUI **BMID pass-through** 
 - BMID-friendly geometry (18 cm radius, 355° arc, phase-delay option)
 - Session reports under `results/`
 
-**Known gap:** GUI still reconstructs primarily from **filtered `S21(f)`**; Hamming / Week 3 time-domain are stored in metadata and the handoff file, not yet the default Module 3 input.
+**Week 3 → Module 3 (done):** GUI Reconstruction has an **Imaging input** control. When a processed dataset carries Week 3 metadata, it auto-selects the most-processed Week 3 time signal (clutter-removed first) and beamforms it directly via `reconstruct_all_from_time` (no second IFFT; ROI refinement uses the same signal). Filtered `S21(f)` remains selectable, and missing Week 3 data falls back to it with a log warning. BMID pass-through disables Week 3, so its validated frequency path is unchanged.
 
 ---
 
@@ -187,6 +187,6 @@ Write-ups:
 
 ## Recommended next steps
 
-1. Wire Hamming / Week 3 time-domain as default Module 3 reconstruction input when present.
+1. Ablate Week 3 time-domain vs filtered-S21 imaging on labelled BMID scans.
 2. Keep BMID localization experiments documented in `BMID_DEVELOPMENT_STEPS.md`.
 3. First-scan detection is still the weak number (71/100). Follow-up is the result to quote.
